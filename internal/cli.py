@@ -7,6 +7,7 @@ from jsonargparse import Namespace
 from jsonargparse._typehints import subclass_spec_as_namespace
 from typing import Optional, Union, List, Literal
 from lightning.pytorch.cli import LightningCLI, LightningArgumentParser
+import time
 
 
 def discard_init_args_on_class_path_change(parser_or_action, prev_val, value):
@@ -81,7 +82,8 @@ class CLI(LightningCLI):
             config.trainer.max_epochs = config.max_epochs
 
         # build output path
-        output_path = os.path.join(config.output, config.name)
+        # output_path = os.path.join(config.output, config.name)
+        output_path = config.output
         if config.version is not None:
             output_path = os.path.join(output_path, config.version)
         os.makedirs(output_path, exist_ok=True)
@@ -93,6 +95,12 @@ class CLI(LightningCLI):
             config.ckpt_path = self._search_checkpoint(output_path)
 
         if self.config.subcommand == "fit":
+            if os.path.exists(output_path):
+                print(f"Auto-cleaning existing export directory: {output_path}")
+                import shutil
+
+                shutil.rmtree(output_path)
+                os.makedirs(output_path, exist_ok=True)
             if config.ckpt_path is None:
                 assert (os.path.exists(
                     os.path.join(output_path, "point_cloud")
@@ -154,3 +162,66 @@ class CLI(LightningCLI):
             for i in self.trainer_defaults["callbacks"]:
                 if i.__class__.__name__ == "LazyInstance_ProgressBar":
                     i._lazy_kwargs["refresh_rate"] = config.pbar_rate
+
+        self.fitting_start_time = time.time()
+
+    def after_fit(self):
+        t = time.time() - self.fitting_start_time
+        print(f"Fitting Done. It took {t}sec == {t/3600}h")
+        # print("\n\n<===== After Fit Process =====>\n\n")
+
+        # config = getattr(self.config, self.config.subcommand)
+        # ROOT_PATH = config.output
+        # ckpt_dir = os.path.join(ROOT_PATH, "checkpoints")
+        # print(config.render_frame_offset)
+
+        # print(ROOT_PATH)
+
+        # ckpt_files = os.listdir(ckpt_dir)
+
+        # # Reomve ply files
+        # plys = [ckpt for ckpt in ckpt_files if ckpt.endswith(".ply")]
+        # for ply in plys:
+        #     ply_path = os.path.join(ckpt_dir, ply)
+        #     print("Removing", ply_path)
+        #     os.remove(ply_path)
+
+        # # Convert ckpt to ply
+        # ckpts = [ckpt for ckpt in ckpt_files if ckpt.endswith(".ckpt")]
+        # for file in sorted(ckpts):
+        #     if file.endswith(".ckpt"):
+        #         os.system(f"python utils/ckpt2ply.py {ckpt_dir}/{file}")
+
+        # # Render ply
+        # SEG_LEN = 49
+        # for ckpt in sorted(ckpts):
+        #     ckpt_basename = ckpt.split(".")[0]
+        #     ply_name = ckpt_basename + ".ply"
+        #     colmap_dir = os.path.dirname(ROOT_PATH)
+        #     scene_dir = os.path.dirname(colmap_dir)
+        #     render_3dgs(
+        #         model_path=f"{ckpt_dir}/{ply_name}",
+        #         camera_path=f"{scene_dir}/camera_params.npz",
+        #         output_path=f"{ROOT_PATH}/scene_viz_{ckpt_basename}.mp4",
+        #         fps=10,
+        #         start_frame=config.render_frame_offset,
+        #         end_frame=config.render_frame_offset + SEG_LEN,
+        #     )
+
+        # # Remove Checkpoint Folder
+        # print("Removing Checkpoints and Gaussians")
+        # if os.path.exists(ckpt_dir):
+        #     shutil.rmtree(ckpt_dir)
+
+        # # Remove Unnecessary Files
+        # print("Removing Unnecessary Files")
+        # if os.path.exists(f"{ROOT_PATH}/lightning_logs"):
+        #     shutil.rmtree(f"{ROOT_PATH}/lightning_logs")
+        # target_files = ["appearance_group_ids.json", "appearance_group_ids.pth", "cfg_args", "input.ply"]
+        # for file in target_files:
+        #     target_path = os.path.join(ROOT_PATH, file)
+        #     if os.path.exists(target_path):
+        #         os.remove(target_path)
+        
+        # t = time.time() - self.fitting_start_time
+        # print(f"\nTotal Process Took {t}sec == {t/3600}h\n")
