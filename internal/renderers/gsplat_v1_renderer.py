@@ -583,7 +583,7 @@ class GSplatV1:
         colors = colors.unsqueeze(0)
         background = background.unsqueeze(0)
 
-        rendered_colors, rendered_alphas = rasterize_to_pixels(
+        rendered_colors, rendered_alphas, n_contribs = rasterize_to_pixels(
             means2d=means2d,
             conics=conics,
             colors=colors,
