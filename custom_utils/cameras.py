@@ -1,6 +1,7 @@
 from typing import Optional, Union
 from dataclasses import dataclass, field
 
+import numpy as np
 import torch
 from torch import Tensor
 
@@ -123,9 +124,21 @@ class Cameras:
     full_projection: Tensor = field(init=False)
     camera_center: Tensor = field(init=False)
 
+    intrinsics: Tensor = field(init=False)
+
     time: Optional[Tensor] = None  # [n_cameras]
 
     idx: Tensor = None  # [N_cameras]
+
+    def _set_intrinsit(self):
+        N = self.R.shape[0]
+        intrinsics = torch.zeros((N, 3, 3), device=self.R.device)
+        intrinsics[:, 0, 0] = self.fx
+        intrinsics[:, 1, 1] = self.fy
+        intrinsics[:, 0, 2] = self.cx
+        intrinsics[:, 1, 2] = self.cy
+        intrinsics[:, 2, 2] = 1
+        self.intrinsics = intrinsics
 
     def _calculate_fov(self):
         # calculate fov
@@ -195,6 +208,7 @@ class Cameras:
         self._calculate_c2w()
         self._calculate_ndc_projection_matrix()
         self._calculate_camera_center()
+        self._set_intrinsit()
 
         self.idx = torch.arange(self.R.shape[0], dtype=torch.int32)
 
@@ -365,6 +379,11 @@ def build_cameras(extrinsics, intrinsics):
         extrinsics: [N, 4, 4] numpy array
         intrinsics: [N, 3, 3] numpy array
     """
+    if isinstance(extrinsics, np.ndarray):
+        extrinsics = torch.from_numpy(extrinsics)
+    if isinstance(intrinsics, np.ndarray):
+        intrinsics = torch.from_numpy(intrinsics)
+    
     N = extrinsics.shape[0]
     R_w2c = extrinsics[:, :3, :3]
     T_w2c = extrinsics[:, :3, 3]
@@ -386,14 +405,14 @@ def build_cameras(extrinsics, intrinsics):
     camera_type = torch.zeros((N), dtype=torch.int)
 
     cameras = Cameras(
-        R=torch.from_numpy(R_w2c).float(),
-        T=torch.from_numpy(T_w2c).float(),
-        fx=torch.from_numpy(fx).float(),
-        fy=torch.from_numpy(fy).float(),
-        cx=torch.from_numpy(cx).float(),
-        cy=torch.from_numpy(cy).float(),
-        width=torch.from_numpy(width).int(),
-        height=torch.from_numpy(height).int(),
+        R=R_w2c,
+        T=T_w2c,
+        fx=fx,
+        fy=fy,
+        cx=cx,
+        cy=cy,
+        width=width,
+        height=height,
         appearance_id=appearance_id,
         normalized_appearance_id=normalized_appearance_id,
         distortion_params=distortion_params,

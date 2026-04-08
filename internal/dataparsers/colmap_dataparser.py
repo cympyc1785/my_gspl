@@ -339,7 +339,7 @@ class ColmapDataParser(DataParser):
             # whether mask exists
             mask_path = None
             if self.params.mask_dir is not None:
-                mask_path = os.path.join(self.params.mask_dir, "{}.png".format(extrinsics.name))
+                mask_path = os.path.join(self.params.mask_dir, "{}.png".format(extrinsics.name.split(".")[0]))
                 if os.path.exists(mask_path) is True:
                     loaded_mask_count += 1
                 else:

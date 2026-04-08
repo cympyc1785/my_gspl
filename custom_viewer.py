@@ -261,7 +261,7 @@ def cli():
     parser.add_argument("--scale_factor", type=float, default=1.0)
     parser.add_argument("--custom_camera_path", type=str, default=None)
     parser.add_argument("--host", "-a", type=str, default="0.0.0.0")
-    parser.add_argument("--port", "-p", type=int, default=8080)
+    parser.add_argument("--port", "-p", type=int, default=9999)
     parser.add_argument("--background_color", "--background_color", "--bkg_color", "-b",
                         type=str, nargs="+", default=["black"],
                         help="e.g.: white, black, 0 0 0, 1 1 1")
