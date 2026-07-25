@@ -25,8 +25,8 @@ from .render_frustum import add_frustum_spline
 from .color_points import color_points_by_attention
 
 class CustomPanel:
-    def __init__(self, viewer, server, root_path, renderer=None, recon=None, custom_camera_data_path=None, pcd=None, ply_path=None, pcd_type=None,
-                 task_list_path=None, task_type="pred"):
+    def __init__(self, viewer, server, root_path, renderer=None, recon=None, custom_camera_data_path=None, pcd=None, ply_path=None,
+    data_root_path=None, pcd_type=None, task_list_path=None, task_type="pred", task_offset=0):
         self.server = server
         self.root_path = root_path
         self.scene_root_path = None
@@ -39,11 +39,12 @@ class CustomPanel:
         self.pcd = pcd
         self.ply_path = ply_path
         self.input_pcd_type = pcd_type
-        self.data_root_path = "/data2/ckd248/SCVideo/camera_generation/evaluation"
-        self.output_dir = "/data1/cympyc1785/gaussian-splatting-lightning/results"
+        self.data_root_path = data_root_path
+        self.output_dir = "results"
         self.current_task_idx = None
         self.pcd_path = None
         self.frame_idx = 0
+        self.task_offset=task_offset
 
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -60,31 +61,38 @@ class CustomPanel:
             self.custom_camera_path = viewer.custom_camera_path
 
         self.valid_camera_types = ["ours", "GS", "colmap", "npz", "vae", "custom", "monst3r", "GT"]
-        self.valid_camera_pred_types = [
-                                        "director",
-                                        "director3d",
-                                        "gendop_text",
-                                        "gendop_text_rgbd",
-                                        "gendop_text_rgbd_ours",
-                                        "20260302_202052_w_vae_w_bin_w_attnloss_w_coord",
-                                        "20260302_202052_w_vae_w_bin_w_attnloss_w_coord_2",
-                                    ]
-        self.render_targets = [
-            "director3d",
-            "gendop_text_rgbd_ours",
-            "20260302_202052_w_vae_w_bin_w_attnloss_w_coord",
-            "20260302_202052_w_vae_w_bin_w_attnloss_w_coord_2",
-        ]
+
+        list_for_worldtraj = [
+                            "director3d",
+                            "gendop_text_rgbd",
+                            "worlddirector_final",
+                        ]
+        list_for_others = [
+                            "director3d",
+                            "gendop_text_rgbd_origin",
+                            "worlddirector"
+                        ]
+
+        type_preset = list_for_worldtraj if self.task_offset == 0 else list_for_others
+
+        self.valid_camera_pred_types = type_preset
+        self.render_targets = type_preset
+        self.retrieve_targets = type_preset
+
+        self.auto_frustum_targets = type_preset + ["GT"]
         
+        color_preset = [
+            [1.0, 1.0, 1.0],
+            [0.5, 0.5, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+
         self.preset_frustum_colors = {
-            "GT": [1.0, 0.0, 0.0],
-            "director3d": [1.0, 1.0, 0.0],
-            "gendop_text": [1.0, 0.0, 0.0],
-            "gendop_text_rgbd": [0.0, 1.0, 0.0],
-            "gendop_text_rgbd_ours": [0.0, 1.0, 1.0],
-            "20260302_202052_w_vae_w_bin_w_attnloss_w_coord": [0.0, 0.0, 0.5],
-            "20260302_202052_w_vae_w_bin_w_attnloss_w_coord_2": [0.0, 0.0, 1.0],
+            "GT": [1.0, 0.0, 0.0]
         }
+
+        for cam_type, color in zip(type_preset, color_preset):
+            self.preset_frustum_colors[cam_type] = color
 
         self.is_frustum_visualized = {}
         self.frustum_handles = {}
@@ -146,9 +154,9 @@ class CustomPanel:
             @get_task_button.on_click
             def _(event: viser.GuiEvent) -> None:
                 self.get_task(self.task_slider.value)
-                if self.task_type == "pred":
+                if self.task_type in ["pred", "tartanair", "scannet"]:
                     self.visualize_all_frustums(event.client)
-                elif self.task_type == "gt":
+                if self.task_type == "gt":
                     self.camera_type.value = "GT"
                     self.visualize_camera_frustum(event.client)
 
@@ -162,7 +170,7 @@ class CustomPanel:
             def _(event: viser.GuiEvent) -> None:
                 self.task_slider.value = self.task_slider.value + 1
                 self.get_task(self.task_slider.value)
-                if self.task_type == "pred":
+                if self.task_type in ["pred", "tartanair", "scannet"]:
                     self.visualize_all_frustums(event.client)
                 elif self.task_type == "gt":
                     self.camera_type.value = "GT"
@@ -176,13 +184,8 @@ class CustomPanel:
             self.camera_type = self.server.gui.add_dropdown(
                 "Camera Type",
                 self.valid_camera_types + self.valid_camera_pred_types,
-                initial_value="director",
+                initial_value="GS",
             )
-
-            # self.coordinate_change_checkbox = self.server.gui.add_checkbox(
-            #     "Change Camera Coordinate",
-            #     initial_value=False,
-            # )
 
             self.fps = self.server.gui.add_number(
                 "FPS",
@@ -243,6 +246,50 @@ class CustomPanel:
                 imageio.mimsave(save_path, renders, fps=self.fps.value)
                 print("Saved to", save_path)
 
+            render_all_by_client_button = self.server.gui.add_button(
+                    "Render All by client",
+                    color="Brown",
+                    icon=viser.Icon.PLAYER_PLAY,
+                    hint="Save smplx scale",
+                )
+            @render_all_by_client_button.on_click
+            def _(event: viser.GuiEvent) -> None:
+                init_cam_type = self.camera_type.value
+
+                self.clean_all_camera_frustum()
+
+                for cam_type in self.render_targets:
+                    self.camera_type.value = cam_type
+                    cameras = self.get_cameras_by_type()
+                    renders = self.render_with_client(event.client, cameras)
+
+                    if self.current_task_idx is not None:
+                        output_dir = f"{self.output_dir}/{self.current_task_idx}_{self.task_list[self.current_task_idx]}"
+                    else:
+                        output_dir = self.output_dir
+
+                    os.makedirs(output_dir, exist_ok=True)
+
+                    timestamp = int(time.time())
+                    save_path = os.path.join(output_dir, f"{self.camera_type.value}_pointcloud_viz_{timestamp}.mp4")
+                    imageio.mimsave(save_path, renders, fps=self.fps.value)
+
+                    frame_indices = {
+                        "first": 0,
+                        "middle": len(renders) // 2,
+                        "last": len(renders) - 1
+                    }
+
+                    output_dir = os.path.join(output_dir, cam_type)
+                    os.makedirs(output_dir, exist_ok=True)
+
+                    for name, idx in frame_indices.items():
+                        save_path = os.path.join(output_dir, f"{name}.png")
+                        cv2.imwrite(save_path, renders[idx])
+
+                self.camera_type.value = init_cam_type
+                print("Saved all videos")
+
             render_by_point_renderer_button = self.server.gui.add_button(
                     "Render by Point Renderer",
                     color="Brown",
@@ -264,17 +311,17 @@ class CustomPanel:
                 timestamp = int(time.time())
                 save_path = os.path.join(output_dir, f"{self.camera_type.value}_point_scene_render_{timestamp}.mp4")
                 print(len(renders))
-                imageio.mimsave(save_path, renders, fps=10)
+                imageio.mimsave(save_path, renders, fps=self.fps.value)
                 # save_video_imageio(renders, save_path, fps=self.fps.value)
                 print("Saved to", save_path)
 
-            render_images_sample_button = self.server.gui.add_button(
+            render_gs_images_samples_button = self.server.gui.add_button(
                     "Render GS Image Samples",
                     color="purple",
                     icon=viser.Icon.PLAYER_PLAY,
                     hint="Save smplx scale",
                 )
-            @render_images_sample_button.on_click
+            @render_gs_images_samples_button.on_click
             def _(event: viser.GuiEvent) -> None:
                 cameras = self.get_cameras_by_type(sample=True)
                 scene_path = os.path.join(self.scene_root_path, "scene.ply")
@@ -467,6 +514,63 @@ class CustomPanel:
 
                 print("Saving video done.")
 
+            retrieve_all_camera_preds = self.server.gui.add_button(
+                    "Retrieve All Camera Video",
+                    color="purple",
+                    icon=viser.Icon.PLAYER_PLAY,
+                    hint="Save smplx scale",
+                )
+            @retrieve_all_camera_preds.on_click
+            def _(event: viser.GuiEvent) -> None:
+                print("Retrieving videos...")
+
+                for cam_type in self.render_targets:
+                    if self.current_task_idx is not None:
+                        output_dir = f"{self.output_dir}/{self.current_task_idx}_{self.task_list[self.current_task_idx]}"
+                    else:
+                        output_dir = self.output_dir
+                    os.makedirs(output_dir, exist_ok=True)
+
+                    video_src_path = os.path.join(self.data_root_path, cam_type, "test", f"{self.task_list[self.current_task_idx]}_render.mp4")
+                    video_dst_path = os.path.join(output_dir, f"{cam_type}_render.mp4")
+
+                    if not os.path.exists(video_src_path):
+                        print("no vid", video_src_path)
+                        continue
+
+                    shutil.copy(video_src_path, video_dst_path)
+
+                    # capture 3 frames
+                    cap = cv2.VideoCapture(video_dst_path)
+                    if not cap.isOpened():
+                        print(f"Cannot open video: {video_dst_path}")
+                        continue
+
+                    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    frame_indices = {
+                        "first": 0,
+                        "middle": total_frames // 2,
+                        "last": total_frames - 1
+                    }
+
+                    output_dir = os.path.join(output_dir, cam_type)
+                    os.makedirs(output_dir, exist_ok=True)
+
+                    for name, idx in frame_indices.items():
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                        ret, frame = cap.read()
+
+                        if not ret:
+                            print(f"Failed to read {name} frame at index {idx}")
+                            continue
+
+                        save_path = os.path.join(output_dir, f"{name}.png")
+                        cv2.imwrite(save_path, frame)
+
+                    cap.release()
+
+                print("Saving video done.")
+
             self.vis_frustum_idx = self.server.gui.add_number(
                     "Viz Frustum Index",
                     min=0,
@@ -501,7 +605,7 @@ class CustomPanel:
                     min=0.01,
                     max=1.0,
                     step=0.01,
-                    initial_value=0.2,
+                    initial_value=0.25,
                 )
 
             self.frustum_thickness = self.server.gui.add_number(
@@ -509,7 +613,7 @@ class CustomPanel:
                     min=0.1,
                     max=10.0,
                     step=0.1,
-                    initial_value=4,
+                    initial_value=8,
                 )
 
             self.frustum_start_color = self.server.gui.add_vector3(
@@ -563,6 +667,107 @@ class CustomPanel:
             @clear_all_camera_frustum_button.on_click
             def _(event: viser.GuiEvent) -> None:
                 self.clean_all_camera_frustum()
+
+            screenshot_all_camera_frustum_button = self.server.gui.add_button(
+                "Screenshot all cam",
+                color="Green",
+                icon=viser.Icon.PLAYER_PLAY,
+                hint="Screenshot",
+            )
+            @screenshot_all_camera_frustum_button.on_click
+            def _(event: viser.GuiEvent) -> None:
+                client = event.client
+                init_cam_type = self.camera_type.value
+                    
+                for cam_type in self.render_targets:
+                    self.camera_type.value = cam_type
+
+                    self.clean_all_camera_frustum()
+
+                    self.visualize_camera_frustum(client)
+
+                    image = client.camera.get_render(width=1280, height=720)
+
+                    if self.current_task_idx is not None:
+                        output_dir = f"{self.output_dir}/{self.current_task_idx}_{self.task_list[self.current_task_idx]}/screenshot"
+                    else:
+                        output_dir = f"{self.output_dir}/screenshot"
+
+                    os.makedirs(output_dir, exist_ok=True)
+            
+                    timestamp = int(time.time())
+                    save_path = os.path.join(output_dir, f"{self.current_task_idx}_{self.camera_type.value}_screenshot_{timestamp}.png")
+                    imageio.imwrite(save_path, image)
+                    
+                    print(f"Screenshot Saved: {save_path}")
+                    # print(f"Image Shape: {image.shape}")
+                
+                self.camera_type.value = init_cam_type
+
+            all_screen_record_button = self.server.gui.add_button(
+                "All Screen record",
+                color="Green",
+                icon=viser.Icon.PLAYER_PLAY,
+                hint="Screenrecord",
+            )
+            @all_screen_record_button.on_click
+            def _(event: viser.GuiEvent) -> None:
+                client = event.client
+                assert client is not None
+
+                init_cam_type = self.camera_type.value
+
+                if self.current_task_idx is not None:
+                    output_dir = f"{self.output_dir}/{self.current_task_idx}_{self.task_list[self.current_task_idx]}"
+                else:
+                    output_dir = self.output_dir
+                os.makedirs(output_dir, exist_ok=True)
+                
+                for camera_type in self.render_targets:
+                    self.clean_all_camera_frustum()
+                    self.camera_type.value = camera_type
+                    cameras = self.get_cameras_by_type()
+
+                    fov, quat, position = camera_to_fov_quat_position(cameras[0])
+
+                    f_min, f_max = self.frustum_range.value
+                    f_min = int(f_min)
+                    f_max = int(f_max)
+                    cam_min = f_min
+                    cam_max = min(f_max, len(cameras))
+
+                    start_color = np.array(self.frustum_start_color.value)
+                    end_color = np.array(self.frustum_end_color.value)
+                    t = np.linspace(0, 1, (cam_max - cam_min))[:, None]  # (N, 1)
+                    colors = (1 - t) * start_color + t * end_color  # (N, 3)
+
+                    screenrecord_list = []
+                    for i in tqdm(range(cam_min, cam_max, 1)):
+                        if i % self.frustum_interval.value == 0:
+                            camera = cameras[i]
+                            fov, quat, position = camera_to_fov_quat_position(camera)
+
+                            handle = add_frustum_spline(
+                                scene=client.scene,
+                                name=f"camera_{i}_frustum_{camera_type}",
+                                fov_y=fov,
+                                aspect=camera.cx / camera.cy,
+                                wxyz=quat,
+                                position=position,
+                                far=1.0,
+                                scale=self.frustum_scale.value,
+                                thickness=self.frustum_thickness.value,
+                                color=colors[i],
+                            )
+
+                            self.frustum_handles[camera_type].append(handle)
+                        image = client.camera.get_render(width=1280, height=720)
+                        screenrecord_list.append(image)
+                    save_path = os.path.join(output_dir, f"cam_frustum_vis_{camera_type}.mp4")
+                    save_video_imageio(np.array(screenrecord_list), save_path, fps=self.fps.value)
+                    print(f"Video Saved: {save_path}")
+
+                self.camera_type.value = init_cam_type
 
             # ===== PCD
 
@@ -755,8 +960,27 @@ class CustomPanel:
         self.current_task_idx = idx
         self.task_slider.value = idx
 
-        if self.task_type == "pred":
-            split, scene_name, seg_idx_str = task.split("_")
+        tartanair_splits = ["Easy_left", "Easy_right", "Hard_left", "Hard_right"]
+        scannet_splits = ["scannet_output_sampled"]
+        if self.task_type in ["pred", "tartanair", "scannet"]:
+            if task.startswith("scannet_output_sampled"):
+                split = "scannet_output_sampled"
+                scene_name, seg_idx_str = task.replace("scannet_output_sampled_", "").rsplit("_", 1)
+            elif task.startswith("Easy_left"):
+                split = "Easy_left"
+                scene_name, seg_idx_str = task.replace("Easy_left_", "").rsplit("_", 1)
+            elif task.startswith("Easy_right"):
+                split = "Easy_right"
+                scene_name, seg_idx_str = task.replace("Easy_right_", "").rsplit("_", 1)
+            elif task.startswith("Hard_left"):
+                split = "Hard_left"
+                scene_name, seg_idx_str = task.replace("Hard_left_", "").rsplit("_", 1)
+            elif task.startswith("Hard_right"):
+                split = "Hard_right"
+                scene_name, seg_idx_str = task.replace("Hard_right_", "").rsplit("_", 1)
+            else:
+                # GS 만 보기
+                split, scene_name, seg_idx_str = task.split("_")
         elif self.task_type == "gt":
             if task.startswith("youtube_vis"):
                 split = "youtube_vis"
@@ -793,6 +1017,14 @@ class CustomPanel:
             self.scene_root_path = f"/data1/cympyc1785/SceneData/DynamicVerse/scenes/dynpose-100k/{split}/{scene_name}"
             self.pcd_path = os.path.join(self.scene_root_path, "scene.ply")
             self.pcd_type.value = "ply"
+        elif split == "scannet_output_sampled":
+            self.scene_root_path = f"/data3/cympyc1785/scannet_output_sampled/{scene_name}"
+            self.pcd_path = os.path.join(self.scene_root_path, "scene.ply")
+            self.pcd_type.value = "ply"
+        elif split in tartanair_splits:
+            self.scene_root_path = f"/data3/cympyc1785/tartanair_output_sampled/{split}/{scene_name}"
+            self.pcd_path = os.path.join(self.scene_root_path, "scene.ply")
+            self.pcd_type.value = "ply"
         print("pcd :", self.pcd_path)
 
         prompt_path = os.path.join(self.scene_root_path, "prompts.json")
@@ -801,14 +1033,14 @@ class CustomPanel:
         
         self.client_camera_save_path = os.path.join(self.scene_root_path, "saved_client_camera.json")
         
-        if self.task_type == "pred":
+        if self.task_type in ["pred", "tartanair", "scannet"]:
             s, e = prompt_data[seg_idx_str]["frame_idx"]
 
             self.frame_idx = s
 
             model_type = self.camera_type.value
             if model_type not in self.valid_camera_pred_types:
-                model_type = "director"
+                model_type = "director3d"
 
             text_path = os.path.join(self.data_root_path, model_type, "test", f"{task}_caption.json")
         
@@ -850,7 +1082,7 @@ class CustomPanel:
             self.frustum_start_color.value = (color[0], color[1], color[2])
             self.frustum_end_color.value = (color[0], color[1], color[2])
 
-        for pred_cam_type in self.valid_camera_pred_types[1:2] + self.valid_camera_pred_types[4:] + ["GT"]:
+        for pred_cam_type in self.auto_frustum_targets:
             self.camera_type.value = pred_cam_type
             set_frustum_color(self.preset_frustum_colors[pred_cam_type])
             self.visualize_camera_frustum(client)
@@ -1081,7 +1313,7 @@ class CustomPanel:
             cameras = self.get_cameras_from_monst3r(camera_path)
         elif camera_type == "GT":
             cameras = self.get_cameras_from_json(camera_path)
-            if self.task_type == "pred":
+            if self.task_type in ["pred", "tartanair", "scannet"]:
                 cam_list = []
                 for idx in range(self.frame_idx, self.frame_idx+49):
                     cam_list.append(cameras[idx])
@@ -1147,14 +1379,6 @@ class CustomPanel:
         w2c = ext
 
         cameras = build_cameras(w2c, intrinsics)
-        return cameras
-    
-    def get_cameras_from_vae(self):
-        _, intrinsics = get_camera_params_from_json(os.path.join(self.root_path, "cameras.json"))
-        w2c_ext = np.load(f"{self.root_path}/vae4.npy", allow_pickle=True)
-        N = w2c_ext.shape[0]
-        intrinsics = intrinsics[:N]
-        cameras = build_cameras(w2c_ext, intrinsics)
         return cameras
     
     def get_cameras_from_custom(self):
@@ -1270,7 +1494,17 @@ class CustomPanel:
         
         points = np.asarray(pcd_o3d.points)
         colors = np.asarray(pcd_o3d.colors) # 0~1 사이 값
+        
+        # g = trimesh.points.PointCloud(vertices=points, colors=colors)
+        return points, colors
 
+    def get_pcd_from_tartanair(self, pcd_path):
+        pcd_o3d = o3d.io.read_point_cloud(pcd_path)
+        
+        points = np.asarray(pcd_o3d.points)
+        colors = np.asarray(pcd_o3d.colors) # 0~1 사이 값
+
+        # Rotation for tartan air
         P = np.array([
             [0, 1, 0],
             [0, 0, 1],
@@ -1281,7 +1515,7 @@ class CustomPanel:
         # g = trimesh.points.PointCloud(vertices=points, colors=colors)
         return points, colors
 
-    def render_with_client(self, client, cameras: Cameras, out_dir):
+    def render_with_client(self, client, cameras: Cameras):
         images = []
         print("Rendering...")
         for camera in tqdm(cameras):
@@ -1434,7 +1668,7 @@ class CustomPanel:
             #             img[y, x] = colors[point_indices[i]]
             #             idx_map[y, x] = point_indices[i]
 
-            img = torch.zeros((H * W, 3), device=device, dtype=colors.dtype)
+            img = torch.ones((H * W, 3), device=device, dtype=colors.dtype)
             depth = torch.full((H * W,), float("inf"), device=device, dtype=z.dtype)
             idx_map = torch.full((H * W,), -1, device=device, dtype=torch.long)
             
@@ -1495,9 +1729,13 @@ class CustomPanel:
                 with open(ckpt_path, "r") as f:
                     idx = json.load(f)
                 print("Task Checkpoint Loaded", idx)
+
+            if "tartanair" in self.data_root_path or "scannet" in self.data_root_path:
+                self.valid_camera_pred_types
+
             self.get_task(idx)
 
-            if self.task_type == "pred":
+            if self.task_type in ["pred", "tartanair", "scannet"]:
                 self.visualize_all_frustums(client)
             elif self.task_type == "gt":
                 self.camera_type.value = "GT"
@@ -1639,7 +1877,7 @@ def convert_coordinate(extrinsic):
     elif isinstance(extrinsic, torch.Tensor):
         device = extrinsic.device
     
-    ext_tensor = torch.tensor(extrinsic)
+    ext_tensor = torch.tensor(extrinsic, device=device)
     R = ext_tensor[..., :3, :3]
     t = ext_tensor[..., :3, 3]
 
