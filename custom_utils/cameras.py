@@ -249,6 +249,108 @@ class Cameras:
         for i in range(len(self)):
             yield self[i]
 
+@dataclass
+class BatchCameras:
+    """
+    Batch of Cameras
+
+    Y down, Z forward
+    world-to-camera
+    """
+
+    R: Tensor  # [B, n_cameras, 3, 3]
+    T: Tensor  # [B, n_cameras, 3]
+    fx: Tensor  # [B, n_cameras]
+    fy: Tensor  # [B, n_cameras]
+    cx: Tensor  # [B, n_cameras]
+    cy: Tensor  # [B, n_cameras]
+    width: Tensor  # [B, n_cameras]
+    height: Tensor  # [B, n_cameras]
+    appearance_id: Tensor  # [B, n_cameras]
+    normalized_appearance_id: Optional[Tensor]  # [B, n_cameras]
+
+    distortion_params: Optional[Union[Tensor, list[Tensor]]]
+    """
+    NOTE: this should be None or zero tensors currently
+
+    For perspective: (k1,k2,p1,p2[,k3[,k4,k5,k6[,s1,s2,s3,s4[,τx,τy]]]]) of 4, 5, 8, 12 or 14 elements
+    For fisheye: (k1, k2, k3, k4)
+    """
+
+    camera_type: Tensor  # Int[B, n_cameras]
+
+    def __len__(self):
+        return self.R.shape[0]
+
+    def __getitem__(self, index) -> Cameras:
+        return Cameras(
+            R=self.R[index],
+            T=self.T[index],
+            fx=self.fx[index],
+            fy=self.fy[index],
+            cx=self.cx[index],
+            cy=self.cy[index],
+            width=self.width[index],
+            height=self.height[index],
+            appearance_id=self.appearance_id[index],
+            normalized_appearance_id=self.normalized_appearance_id[index],
+            distortion_params=self.distortion_params[index],
+            camera_type=self.camera_type[index],
+        )
+
+    def __iter__(self):
+        for i in range(len(self)):
+            yield self[i]
+
+# Helper Functions
+
+def build_cameras(extrinsics, intrinsics):
+    """
+    Input:
+        extrinsics: [N, 4, 4] numpy array
+        intrinsics: [N, 3, 3] numpy array
+    """
+    if isinstance(extrinsics, np.ndarray):
+        extrinsics = torch.from_numpy(extrinsics)
+    if isinstance(intrinsics, np.ndarray):
+        intrinsics = torch.from_numpy(intrinsics)
+    
+    N = extrinsics.shape[0]
+    R_w2c = extrinsics[:, :3, :3]
+    T_w2c = extrinsics[:, :3, 3]
+
+    # R_c2w = np.transpose(R_w2c, (0, 2, 1))
+    # T_c2w = (- R_c2w @ T_w2c).squeeze(-1)
+
+    fx = intrinsics[:, 0, 0]
+    fy = intrinsics[:, 1, 1]
+    cx = intrinsics[:, 0, 2]
+    cy = intrinsics[:, 1, 2]
+    width = intrinsics[:, 0, 2] * 2
+    height = intrinsics[:, 1, 2] * 2
+    # width = np.array([432] * N)
+    # height = np.array([240] * N)
+    appearance_id = torch.zeros((N), dtype=torch.int)
+    normalized_appearance_id = torch.zeros((N), dtype=torch.int)
+    distortion_params = torch.zeros((N, 4), dtype=torch.int)
+    camera_type = torch.zeros((N), dtype=torch.int)
+
+    cameras = Cameras(
+        R=R_w2c,
+        T=T_w2c,
+        fx=fx,
+        fy=fy,
+        cx=cx,
+        cy=cy,
+        width=width,
+        height=height,
+        appearance_id=appearance_id,
+        normalized_appearance_id=normalized_appearance_id,
+        distortion_params=distortion_params,
+        camera_type=camera_type,
+    )
+    return cameras
+
 def make_list_to_cameras(cameras:list[Camera])->Cameras:
     if len(cameras) == 0:
         raise ValueError("cameras list is empty")
@@ -319,104 +421,38 @@ def make_list_to_cameras(cameras:list[Camera])->Cameras:
 
     return cams
 
-
-@dataclass
-class BatchCameras:
-    """
-    Batch of Cameras
-
-    Y down, Z forward
-    world-to-camera
-    """
-
-    R: Tensor  # [B, n_cameras, 3, 3]
-    T: Tensor  # [B, n_cameras, 3]
-    fx: Tensor  # [B, n_cameras]
-    fy: Tensor  # [B, n_cameras]
-    cx: Tensor  # [B, n_cameras]
-    cy: Tensor  # [B, n_cameras]
-    width: Tensor  # [B, n_cameras]
-    height: Tensor  # [B, n_cameras]
-    appearance_id: Tensor  # [B, n_cameras]
-    normalized_appearance_id: Optional[Tensor]  # [B, n_cameras]
-
-    distortion_params: Optional[Union[Tensor, list[Tensor]]]
-    """
-    NOTE: this should be None or zero tensors currently
-
-    For perspective: (k1,k2,p1,p2[,k3[,k4,k5,k6[,s1,s2,s3,s4[,τx,τy]]]]) of 4, 5, 8, 12 or 14 elements
-    For fisheye: (k1, k2, k3, k4)
-    """
-
-    camera_type: Tensor  # Int[B, n_cameras]
-
-    def __len__(self):
-        return self.R.shape[0]
-
-    def __getitem__(self, index) -> Cameras:
-        return Cameras(
-            R=self.R[index],
-            T=self.T[index],
-            fx=self.fx[index],
-            fy=self.fy[index],
-            cx=self.cx[index],
-            cy=self.cy[index],
-            width=self.width[index],
-            height=self.height[index],
-            appearance_id=self.appearance_id[index],
-            normalized_appearance_id=self.normalized_appearance_id[index],
-            distortion_params=self.distortion_params[index],
-            camera_type=self.camera_type[index],
-        )
-
-    def __iter__(self):
-        for i in range(len(self)):
-            yield self[i]
-
-def build_cameras(extrinsics, intrinsics):
-    """
-    Input:
-        extrinsics: [N, 4, 4] numpy array
-        intrinsics: [N, 3, 3] numpy array
-    """
-    if isinstance(extrinsics, np.ndarray):
-        extrinsics = torch.from_numpy(extrinsics)
-    if isinstance(intrinsics, np.ndarray):
-        intrinsics = torch.from_numpy(intrinsics)
+def convert_coordinate(extrinsic):
+    if isinstance(extrinsic, np.ndarray):
+        device = 'cpu'
+    elif isinstance(extrinsic, torch.Tensor):
+        device = extrinsic.device
     
-    N = extrinsics.shape[0]
-    R_w2c = extrinsics[:, :3, :3]
-    T_w2c = extrinsics[:, :3, 3]
+    ext_tensor = torch.tensor(extrinsic)
+    R = ext_tensor[..., :3, :3]
+    t = ext_tensor[..., :3, 3]
 
-    # R_c2w = np.transpose(R_w2c, (0, 2, 1))
-    # T_c2w = (- R_c2w @ T_w2c).squeeze(-1)
+    R_inv = R.transpose(-1, -2)
+    t_inv = (-R_inv @ t.unsqueeze(-1)).squeeze(-1)
 
-    fx = intrinsics[:, 0, 0]
-    fy = intrinsics[:, 1, 1]
-    cx = intrinsics[:, 0, 2]
-    cy = intrinsics[:, 1, 2]
-    width = intrinsics[:, 0, 2] * 2
-    height = intrinsics[:, 1, 2] * 2
-    # width = np.array([432] * N)
-    # height = np.array([240] * N)
-    appearance_id = torch.zeros((N), dtype=torch.int)
-    normalized_appearance_id = torch.zeros((N), dtype=torch.int)
-    distortion_params = torch.zeros((N, 4), dtype=torch.int)
-    camera_type = torch.zeros((N), dtype=torch.int)
+    ext_inv = torch.zeros_like(ext_tensor, device=device)
+    ext_inv[..., :3, :3] = R_inv
+    ext_inv[..., :3, 3] = t_inv
+    ext_inv[..., 3, 3] = 1
 
-    cameras = Cameras(
-        R=R_w2c,
-        T=T_w2c,
-        fx=fx,
-        fy=fy,
-        cx=cx,
-        cy=cy,
-        width=width,
-        height=height,
-        appearance_id=appearance_id,
-        normalized_appearance_id=normalized_appearance_id,
-        distortion_params=distortion_params,
-        camera_type=camera_type,
-    )
-    return cameras
+    if isinstance(extrinsic, np.ndarray):
+        ext_inv = ext_inv.numpy()
+
+    return ext_inv
+
+def camera_to_fov_quat_position(camera: Camera):
+    c2w = torch.linalg.inv(camera.world_to_camera.transpose(-1, -2)).detach().cpu().numpy()
+    R = c2w[:3, :3]
+    t = c2w[:3, 3]
+    focal = [camera.fx, camera.fy]
+    princpt = [camera.cx, camera.cy]
+    r = Rotation.from_matrix(R.tolist())
+    quat = r.as_quat() # (x, y, z, w)
+    quat = np.array([quat[3], quat[0], quat[1], quat[2]]) # (w, x, y, z)
+    fov_radians = 2 * np.arctan(2 * princpt[1].cpu() / (2 * focal[1].cpu()))
+    return fov_radians, quat, t
 
