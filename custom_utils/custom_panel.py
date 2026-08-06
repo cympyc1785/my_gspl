@@ -6,7 +6,6 @@ import viser
 import imageio
 import json
 import time
-import csv
 import cv2
 import shutil
 
@@ -14,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from tqdm import tqdm
 from .cameras import Cameras, camera_to_fov_quat_position
-from . import camera_parser, pointcloud_parser
+from . import camera_parser, pointcloud_parser, task_parser
 from .render_3dgs import get_renders
 
 from .render_frustum import add_frustum_spline
@@ -158,7 +157,7 @@ class CustomPanel:
             self.task_slider = self.server.gui.add_slider(
                 "Task Idx Slider",
                 min=0,
-                max=len(self.task_list) if self.task_list is not None else 0,
+                max=max(len(self.task_list) - 1, 0),
                 initial_value = 0,
                 step=1,
             )
@@ -171,12 +170,7 @@ class CustomPanel:
                 )
             @get_task_button.on_click
             def _(event: viser.GuiEvent) -> None:
-                self.get_task(self.task_slider.value)
-                if self.task_type in ["pred", "tartanair", "scannet"]:
-                    self.visualize_all_frustums(event.client)
-                if self.task_type == "gt":
-                    self.camera_type.value = "GT"
-                    self.visualize_camera_frustum(event.client)
+                self.load_task(self.task_slider.value, event.client)
 
             next_task_button = self.server.gui.add_button(
                     "Next Task",
@@ -186,13 +180,7 @@ class CustomPanel:
                 )
             @next_task_button.on_click
             def _(event: viser.GuiEvent) -> None:
-                self.task_slider.value = self.task_slider.value + 1
-                self.get_task(self.task_slider.value)
-                if self.task_type in ["pred", "tartanair", "scannet"]:
-                    self.visualize_all_frustums(event.client)
-                elif self.task_type == "gt":
-                    self.camera_type.value = "GT"
-                    self.visualize_camera_frustum(event.client)
+                self.load_task(self.task_slider.value + 1, event.client)
 
             # --- CSV-based navigation (separate CSV Idx; syncs Task Idx on move) ---
             self.csv_task_path = self.server.gui.add_text(
@@ -1016,31 +1004,13 @@ class CustomPanel:
                 print("Colored Points")
 
     def load_tasks_from_csv(self, csv_path):
-        """Load a distance-band CSV (columns: orig_index, scene_path, avg_dist_nearest_k)
-        for CSV-idx navigation. This does NOT touch the .txt-based task_list / Task Idx;
-        it only fills a separate csv_task_list used by the CSV Idx slider/buttons.
-
-        Each scene_path (e.g. /.../DL3DV/scenes/1K/<hash>/5) is converted to the
-        '<split>_<scene>_<seg>' task-string format that get_task() already parses,
-        i.e. the last 3 path components joined by '_'.
-        """
-        if not os.path.exists(csv_path):
+        """Fill the separate csv_task_list used by the CSV Idx slider/buttons.
+        This does NOT touch the .txt-based task_list / Task Idx."""
+        try:
+            csv_tasks, orig_idxs = task_parser.load_csv_tasks(csv_path)
+        except FileNotFoundError:
             print("CSV task file doesn't exist:", csv_path)
             return
-
-        csv_tasks = []
-        orig_idxs = []
-        with open(csv_path, "r") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                sp = row.get("scene_path", "").strip().rstrip("/")
-                if not sp:
-                    continue
-                csv_tasks.append("_".join(sp.split("/")[-3:]))
-                try:
-                    orig_idxs.append(int(row.get("orig_index", -1)))
-                except (TypeError, ValueError):
-                    orig_idxs.append(-1)
 
         if not csv_tasks:
             print("No tasks parsed from CSV:", csv_path)
@@ -1056,17 +1026,6 @@ class CustomPanel:
         self.csv_slider.value = 0
         print(f"Loaded {len(self.csv_task_list)} CSV tasks from {csv_path}")
 
-    def _resolve_task_idx(self, task_str, orig_index):
-        """Map a CSV-derived task string to its index in the .txt-based task_list."""
-        if self._task_index_map is None:
-            self._task_index_map = {t: i for i, t in enumerate(self.task_list)}
-        if task_str in self._task_index_map:
-            return self._task_index_map[task_str]
-        # fallback: same-order lists (e.g. valid_task_list.txt matches test_data_final)
-        if 0 <= orig_index < len(self.task_list) and self.task_list[orig_index] == task_str:
-            return orig_index
-        return None
-
     def get_csv_task(self, csv_idx, client=None):
         """Load the CSV task at csv_idx and sync the Task Idx slider to it."""
         if not self.csv_task_list:
@@ -1078,127 +1037,47 @@ class CustomPanel:
 
         task_str = self.csv_task_list[csv_idx]
         orig_index = self.csv_orig_index[csv_idx] if csv_idx < len(self.csv_orig_index) else -1
-        task_idx = self._resolve_task_idx(task_str, orig_index)
+        if self._task_index_map is None:
+            self._task_index_map = {t: i for i, t in enumerate(self.task_list)}
+        task_idx = task_parser.resolve_task_idx(task_str, orig_index, self.task_list,
+                                                self._task_index_map)
         if task_idx is None:
             print(f"CSV task '{task_str}' not in current task list; Task Idx not synced")
             return
 
-        self.task_slider.value = task_idx  # keep Task Idx in sync with CSV Idx
-        self.get_task(task_idx)
+        self.load_task(task_idx, client)  # get_task keeps Task Idx in sync
 
-        if client is not None:
-            if self.task_type in ["pred", "tartanair", "scannet"]:
-                self.visualize_all_frustums(client)
-            elif self.task_type == "gt":
-                self.camera_type.value = "GT"
-                self.visualize_camera_frustum(client)
+    def load_task(self, idx, client=None):
+        """Load the task at idx and draw its frustums. The single entry point for
+        both the Task Idx buttons and the CSV navigation."""
+        self.get_task(idx)
+        self.visualize_task(client)
+
+    def visualize_task(self, client):
+        """Draw whatever frustums the current task type calls for."""
+        if client is None:
+            return
+        if task_parser.is_seg_task(self.task_type):
+            self.visualize_all_frustums(client)
+        elif self.task_type == task_parser.GT_TASK_TYPE:
+            self.camera_type.value = "GT"
+            self.visualize_camera_frustum(client)
 
     def get_task(self, idx):
         print("Load Task")
+        idx = max(0, min(idx, len(self.task_list) - 1))
         task = self.task_list[idx]
         self.current_task_idx = idx
         self.task_slider.value = idx
 
-        tartanair_splits = ["Easy_left", "Easy_right", "Hard_left", "Hard_right"]
-        scannet_splits = ["scannet_output_sampled"]
-        if self.task_type in ["pred", "tartanair", "scannet"]:
-            if task.startswith("scannet_output_sampled"):
-                split = "scannet_output_sampled"
-                scene_name, seg_idx_str = task.replace("scannet_output_sampled_", "").rsplit("_", 1)
-            elif task.startswith("Easy_left"):
-                split = "Easy_left"
-                scene_name, seg_idx_str = task.replace("Easy_left_", "").rsplit("_", 1)
-            elif task.startswith("Easy_right"):
-                split = "Easy_right"
-                scene_name, seg_idx_str = task.replace("Easy_right_", "").rsplit("_", 1)
-            elif task.startswith("Hard_left"):
-                split = "Hard_left"
-                scene_name, seg_idx_str = task.replace("Hard_left_", "").rsplit("_", 1)
-            elif task.startswith("Hard_right"):
-                split = "Hard_right"
-                scene_name, seg_idx_str = task.replace("Hard_right_", "").rsplit("_", 1)
-            else:
-                # GS 만 보기
-                split, scene_name, seg_idx_str = task.split("_")
-        elif self.task_type == "gt":
-            if task.startswith("youtube_vis"):
-                split = "youtube_vis"
-                scene_name = task.replace("youtube_vis_", "")
-            elif task.startswith("SAV"):
-                split = "SAV"
-                scene_name = task.replace("SAV_", "")
-            elif task.startswith("VOST"):
-                split = "VOST"
-                scene_name = task.replace("VOST_", "")
-            elif task.startswith("dynamic_replica"):
-                split = "dynamic_replica"
-                scene_name = task.replace("dynamic_replica_", "")
-            elif task.startswith("uvo"):
-                split = "uvo"
-                scene_name = task.replace("uvo_", "")
-            else:
-                split, scene_name = task.split("_")
-        else:
-            raise ValueError("Invalid task type", self.task_type)
-
-        dl3dv_splits = [f"{i}K" for i in range(1, 8)]
-        dynamicverse_splits = ["DAVIS", "MOSE", "MVS-Synth", "SAV", "VOST", "dynamic_replica", "spring", "youtube_vis", "uvo"]
-        dynpose_splits = [f"dynpose-{i:04d}" for i in range(0, 90)]
-        if split in dl3dv_splits:
-            self.scene_root_path = f"/data1/cympyc1785/SceneData/DL3DV/scenes/{split}/{scene_name}"
-            self.pcd_path = os.path.join(self.scene_root_path, "scene.pt")
-            self.pcd_type.value = "torch"
-        elif split in dynamicverse_splits:
-            self.scene_root_path = f"/data1/cympyc1785/SceneData/DynamicVerse/scenes/{split}/{scene_name}"
-            self.pcd_path = os.path.join(self.scene_root_path, "scene.ply")
-            self.pcd_type.value = "ply"
-        elif split in dynpose_splits:
-            self.scene_root_path = f"/data1/cympyc1785/SceneData/DynamicVerse/scenes/dynpose-100k/{split}/{scene_name}"
-            self.pcd_path = os.path.join(self.scene_root_path, "scene.ply")
-            self.pcd_type.value = "ply"
-        elif split == "scannet_output_sampled":
-            self.scene_root_path = f"/data3/cympyc1785/scannet_output_sampled/{scene_name}"
-            self.pcd_path = os.path.join(self.scene_root_path, "scene.ply")
-            self.pcd_type.value = "ply"
-        elif split in tartanair_splits:
-            self.scene_root_path = f"/data3/cympyc1785/tartanair_output_sampled/{split}/{scene_name}"
-            self.pcd_path = os.path.join(self.scene_root_path, "scene.ply")
-            self.pcd_type.value = "ply"
+        split, scene_name, seg_idx_str = task_parser.parse_task(task, self.task_type)
+        self.scene_root_path, self.pcd_path, pcd_type = task_parser.resolve_scene(split, scene_name)
+        self.pcd_type.value = pcd_type
         print("pcd :", self.pcd_path)
 
-        prompt_path = os.path.join(self.scene_root_path, "prompts.json")
-        with open(prompt_path, "r") as f:
-            prompt_data = json.load(f)
-        
         self.client_camera_save_path = os.path.join(self.scene_root_path, "saved_client_camera.json")
-        
-        if self.task_type in ["pred", "tartanair", "scannet"]:
-            s, e = prompt_data[seg_idx_str]["frame_idx"]
 
-            self.frame_idx = s
-
-            model_type = self.camera_type.value
-            if model_type not in self.valid_camera_pred_types:
-                model_type = self.valid_camera_pred_types[0]
-
-            text_path = os.path.join(self.data_root_path, model_type, "test", f"{task}_caption.json")
-        
-            with open(text_path, "r") as f:
-                text_data = json.load(f)
-                print(text_data)
-        elif self.task_type == "gt":
-            tag_path = os.path.join(self.scene_root_path, "viz", "camera_tags_per_seg.json")
-            with open(tag_path, "r") as f:
-                tag_data = json.load(f)
-                print("camera tag:", tag_data["0"]["description"])
-
-            text_path = os.path.join(self.scene_root_path, "prompts.json")
-            with open(text_path, "r") as f:
-                text_data = json.load(f)
-                print("camera text:", text_data["0"]["prompt_camera"])
-                print("final text:", text_data["0"]["prompt_camera_with_scene_video_inpainted"])
-        else:
-            raise ValueError("Invalid task type", self.task_type)
+        self._load_task_text(task, seg_idx_str)
 
         if self.pcd is not None:
             self.pcd.remove()
@@ -1212,6 +1091,38 @@ class CustomPanel:
         self.clean_all_camera_frustum()
         self.interpolate_cam_checkbox.value = False
         self.frustum_interval.value = 5
+
+    def _load_task_text(self, task, seg_idx_str):
+        """Print the task's caption/tags, and for segment tasks set frame_idx from
+        the segment's frame range."""
+        if task_parser.is_seg_task(self.task_type):
+            prompt_path = os.path.join(self.scene_root_path, "prompts.json")
+            with open(prompt_path, "r") as f:
+                prompt_data = json.load(f)
+            s, e = prompt_data[seg_idx_str]["frame_idx"]
+            self.frame_idx = s
+
+            model_type = self.camera_type.value
+            if model_type not in self.valid_camera_pred_types:
+                model_type = self.valid_camera_pred_types[0]
+
+            text_path = os.path.join(self.data_root_path, model_type, "test", f"{task}_caption.json")
+            with open(text_path, "r") as f:
+                text_data = json.load(f)
+                print(text_data)
+        elif self.task_type == task_parser.GT_TASK_TYPE:
+            tag_path = os.path.join(self.scene_root_path, "viz", "camera_tags_per_seg.json")
+            with open(tag_path, "r") as f:
+                tag_data = json.load(f)
+                print("camera tag:", tag_data["0"]["description"])
+
+            text_path = os.path.join(self.scene_root_path, "prompts.json")
+            with open(text_path, "r") as f:
+                text_data = json.load(f)
+                print("camera text:", text_data["0"]["prompt_camera"])
+                print("final text:", text_data["0"]["prompt_camera_with_scene_video_inpainted"])
+        else:
+            raise ValueError("Invalid task type", self.task_type)
 
     def visualize_all_frustums(self, client):
         s_r, s_g, s_b = self.frustum_start_color.value
@@ -1634,16 +1545,7 @@ class CustomPanel:
                     idx = json.load(f)
                 print("Task Checkpoint Loaded", idx)
 
-            if "tartanair" in self.data_root_path or "scannet" in self.data_root_path:
-                self.valid_camera_pred_types
-
-            self.get_task(idx)
-
-            if self.task_type in ["pred", "tartanair", "scannet"]:
-                self.visualize_all_frustums(client)
-            elif self.task_type == "gt":
-                self.camera_type.value = "GT"
-                self.visualize_camera_frustum(client)
+            self.load_task(idx, client)
         else:
             self.scene_root_path = self.root_path
 
