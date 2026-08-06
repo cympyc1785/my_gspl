@@ -18,7 +18,7 @@ from tqdm import tqdm
 from PIL import Image
 from torchmetrics.multimodal.clip_score import CLIPScore
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from internal.cameras.cameras import Cameras
 from internal.renderers.vanilla_renderer import VanillaRenderer

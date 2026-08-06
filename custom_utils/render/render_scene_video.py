@@ -14,7 +14,7 @@ import numpy as np
 import torch
 import cv2
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from cameras import build_cameras
 
 DEVICE = "cuda"
