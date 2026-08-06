@@ -1,25 +1,21 @@
 import os
 
-import pycolmap
 import numpy as np
 import torch
 import viser
 import imageio
 import json
-import trimesh
 import time
 import csv
 import cv2
 import shutil
-import open3d as o3d
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from tqdm import tqdm
-from .cameras import Camera, Cameras, build_cameras, make_list_to_cameras
-from scipy.spatial.transform import Rotation
+from .cameras import Cameras, camera_to_fov_quat_position
+from . import camera_parser, pointcloud_parser
 from .render_3dgs import get_renders
-from .camera_interpolate_utils import pose_normalize
 
 from .render_frustum import add_frustum_spline
 
@@ -66,7 +62,7 @@ class CustomPanel:
             self.scale_factor = viewer.scale_factor
             self.custom_camera_path = viewer.custom_camera_path
 
-        self.valid_camera_types = ["ours", "GS", "colmap", "npz", "vae", "custom", "monst3r", "GT"]
+        self.valid_camera_types = ["ours", "GS", "colmap", "npz", "custom", "monst3r", "transforms", "GT"]
 
         list_for_worldtraj = [
                             "director3d",
@@ -151,7 +147,7 @@ class CustomPanel:
         if self.ply_path is not None and self.input_pcd_type is not None:
             self.pcd_type.value = self.input_pcd_type
             self.pcd_path = self.ply_path
-            points, colors = self.get_pcd_from_pcd(self.pcd_path)
+            points, colors = self.get_pcd_by_type()
 
             self.points = torch.from_numpy(np.concatenate([points, colors], axis=1)).to("cuda")
 
@@ -1360,6 +1356,15 @@ class CustomPanel:
         
         return renders
 
+    def get_pcd_by_type(self, sample=False):
+        return pointcloud_parser.get_pcd_by_type(
+            self.pcd_type.value,
+            root_path=self.root_path,
+            pcd_path=self.pcd_path,
+            recon=self.recon,
+            sample_num=self.pcd_sample_num.value if sample else None,
+        )
+
     def vis_pointcloud(self):
         if self.pcd is not None:
             self.pcd.remove()
@@ -1368,33 +1373,9 @@ class CustomPanel:
             return
         
         print("Visualizing Pointcloud")
-        default_pcd_path = os.path.join(self.root_path, "scene.ply")
-        if self.pcd_path is not None:
-            pcd_path = self.pcd_path
-        else:
-            pcd_path = default_pcd_path
-
-        print("loading", pcd_path)
-        
-        if self.pcd_type.value == "colmap":
-            points, colors = self.get_pcd_from_colmap()
-        elif self.pcd_type.value == "ply":
-            points, colors = self.get_pcd_from_ply(pcd_path)
-        elif self.pcd_type.value == "npy":
-            points, colors = self.get_pcd_from_npy(pcd_path)
-        elif self.pcd_type.value == "torch":
-            points, colors = self.get_pcd_from_torch(pcd_path)
-        elif self.pcd_type.value == "mesh":
-            points, colors = self.get_pcd_from_mesh_obj(pcd_path)
-        elif self.pcd_type.value == "pcd":
-            points, colors = self.get_pcd_from_pcd(pcd_path)
-        else:
-            raise ValueError("Invalid pcd type", self.pcd_type.value)
-
-        if self.pcd_sample_checkbox.value:
-            idx = torch.randint(0, points.shape[0], (self.pcd_sample_num.value,))
-            points = points[idx]
-            colors = colors[idx]
+        points, colors = self.get_pcd_by_type(
+            sample=self.pcd_sample_checkbox.value,
+        )
 
         self.pcd = self.server.scene.add_point_cloud(
             name="/pcd",
@@ -1417,278 +1398,26 @@ class CustomPanel:
             self.is_frustum_visualized[camera_type] = False
             
     def get_cameras_by_type(self, sample=False):
-        camera_type = self.camera_type.value
-        camera_path = self.root_camera_path
-
-        if self.scene_root_path is not None:
-            camera_path = os.path.join(self.scene_root_path, "cameras.json")
-
-        print("camera type:", camera_type)
-
-        # get pred, gt camera
-        if self.current_task_idx is not None and camera_type in self.valid_camera_pred_types:
-            camera_path = os.path.join(self.data_root_path, camera_type, "test", f"{self.task_list[self.current_task_idx]}_transforms_pred.json")
-
-        if self.custom_camera_checkbox.value:
-            if self.custom_camera_data_path is None:
-                print("custom camera doesn't exists", self.custom_camera_data_path)
-                return
-            
-            with open(self.custom_camera_data_path, "r") as f:
-                camera_data = json.load(f)
-
-            camera_path = camera_data["camera_path"]
-
-        cameras = None
-        if camera_type == "colmap":
-            cameras = self.get_cameras_from_colmap()
-        elif camera_type == "ours":
-            cameras = self.get_cameras_from_json(camera_path)
-        elif camera_type == "GS":
-            cameras = self.get_cameras_from_GS_json(camera_path)
-        elif camera_type == "npz":
-            cameras = self.get_cameras_from_npz()
-        elif camera_type == "vae":
-            cameras = self.get_cameras_from_vae()
-        elif camera_type == "custom":
-            cameras = self.get_cameras_from_custom()
-        elif camera_type == "monst3r":
-            cameras = self.get_cameras_from_monst3r(camera_path)
-        elif camera_type == "transforms":
-            tj = os.path.join(self.scene_root_path, "transforms.json") if self.scene_root_path is not None \
-                else os.path.join(self.root_path, "transforms.json")
-            cameras = self.get_cameras_from_transforms(tj)
-        elif camera_type == "GT":
-            cameras = self.get_cameras_from_json(camera_path)
-            if self.task_type in ["pred", "tartanair", "scannet"]:
-                cam_list = []
-                for idx in range(self.frame_idx, self.frame_idx+49):
-                    cam_list.append(cameras[idx])
-                cameras = cam_list
-        elif camera_type in self.valid_camera_pred_types:
-            cameras = self.get_cameras_from_monst3r(camera_path)
-        else:
-            raise ValueError("Camera type invalid.", camera_type)
-
-        if sample:
-            s, e = int(self.frustum_range.value[0]), int(self.frustum_range.value[1])
-            s = max(s, 0)
-            e = min(e, len(cameras))
-            cameras = [cameras[idx] for idx in range(s, e, self.frustum_interval.value)]
-            print("After Sample", len(cameras))
-        
-        camera_list = []
-        for camera in cameras:
-            camera.T /= self.scale_factor
-            camera_list.append(camera)
-        cameras = make_list_to_cameras(camera_list)
-
-        if self.interpolate_cam_checkbox.value:
-            c2w = cameras.camera_to_world
-            intrinsics = cameras.intrinsics
-            interpolated_c2w, interpolated_intrins = pose_normalize(c2w, intrinsics,
-                                                                    camera_out_seq_len=self.interpolate_cam_num.value)
-            interpolated_w2c = convert_coordinate(interpolated_c2w)
-            cameras = build_cameras(interpolated_w2c, interpolated_intrins)
-
-        return cameras
-
-    def get_cameras_from_colmap(self):
-        if self.recon is None:
-            print("colmap camera doesn't exists")
-            return None
-        extrinsics, intrinsics = get_colmap_camera_params(self.recon)
-        cameras = build_cameras(extrinsics, intrinsics)
-        return cameras
-
-    def get_cameras_from_GS_json(self, camera_path):
-        w2c_ext, intrinsics = get_camera_params_from_json(camera_path)
-        w2c_ext = convert_coordinate(w2c_ext)
-        cameras = build_cameras(w2c_ext, intrinsics)
-        return cameras
-
-    def get_cameras_from_json(self, camera_path):
-        w2c_ext, intrinsics = get_camera_params_from_json(camera_path)
-        cameras = build_cameras(w2c_ext, intrinsics)
-        return cameras
-
-    def get_cameras_from_npz(self):
-        cam_params = np.load(f"{self.root_path}/camera_params.npz", allow_pickle=True)
-        if 'extrinsics' in cam_params.keys():
-            ext = cam_params['extrinsics']
-        elif 'poses' in cam_params.keys():
-            ext = cam_params['poses']
-        else:
-            raise KeyError("No extrinsic key", cam_params)
-        intrinsics = cam_params['intrinsics']
-
-        # w2c = convert_coordinate(ext)
-        w2c = ext
-
-        cameras = build_cameras(w2c, intrinsics)
-        return cameras
-    
-    def get_cameras_from_custom(self):
-
-        data = np.load(self.custom_camera_path, allow_pickle=True)
-        if "poses" in data.keys():
-            w2c_ext = data["poses"]
-        elif "extrinsics" in data.keys():
-            w2c_ext = data["extrinsics"]
-        intrinsics = data["intrinsics"]
-
-        cameras = build_cameras(w2c_ext, intrinsics)
-        return cameras
-    
-    def get_cameras_from_monst3r(self, camera_path):
-        ref_w2cs, intrinsics = get_camera_params_from_json(os.path.join(self.scene_root_path, "cameras.json"))
-
-        with open(camera_path, "r") as f:
-            frames = json.load(f)["frames"]
-        
-        c2ws = []
-        for frame in frames:
-            c2w = frame["transform_matrix"]
-            c2ws.append(c2w)
-        c2ws = torch.tensor(c2ws)
-
-        # S = torch.diag(torch.tensor([1., -1., -1., 1.], device=c2ws.device))
-        # c2ws = S @ c2ws
-
-        # Convert camera convention
-        # OpenCV -> OpenGL (NeRF)
-        c2ws[:, :3, 1:3] *= -1
-
-        R4 = torch.tensor([
-            [-1.,  0.,  0., 0.],
-            [ 0., -1.,  0., 0.],
-            [ 0.,  0.,  1., 0.],
-            [ 0.,  0.,  0., 1.]
-        ])
-
-        c2ws = R4 @ c2ws
-
-        # c2ws[:, :3, :3] = Rx @ c2ws[:, :3, :3]
-        # c2ws[:, :3, 3:4] = Rx @ c2ws[:, :3, 3:4]
-
-        # Normalize
-        ref_c2w = torch.inverse(torch.from_numpy(ref_w2cs[self.frame_idx:self.frame_idx+1]).float())
-        T = ref_c2w @ torch.inverse(c2ws[:1])
-        c2ws = T @ c2ws
-
-        w2c_ext = convert_coordinate(c2ws)
-
-        w2c_ext = w2c_ext.numpy()
-        N = w2c_ext.shape[0]
-        intrinsics = intrinsics[:N]
-        cameras = build_cameras(w2c_ext, intrinsics)
-        return cameras
-
-    def get_cameras_from_transforms(self, camera_path):
-        """Load cameras from a nerfstudio transforms.json in the SAME frame as cameras.json
-        (the 'ours' type), which is aligned with the point cloud. cameras.json was produced as
-            W2C = inv( applied_transform · c2w_opengl · diag(1,-1,-1,1) )
-        so we reproduce exactly that: OpenGL c2w -> OpenCV (flip y,z axes) -> left-multiply
-        the world `applied_transform` (the swap/flip nerfstudio recorded) -> invert to w2c.
-        (Skipping applied_transform leaves the cameras in the un-reoriented frame -> misaligned.)"""
-        with open(camera_path, "r") as f:
-            data = json.load(f)
-        fx, fy = float(data["fl_x"]), float(data["fl_y"])
-        cx, cy = float(data["cx"]), float(data["cy"])
-        frames = sorted(data["frames"], key=lambda fr: fr["file_path"])
-        c2ws = torch.tensor([fr["transform_matrix"] for fr in frames], dtype=torch.float32)
-        # OpenGL/Blender c2w (nerfstudio) -> OpenCV c2w (cam looks +Z, y down)
-        c2ws[:, :3, 1:3] *= -1
-        # world reorientation nerfstudio applied (default identity) -> cameras.json / pc frame
-        at = data.get("applied_transform", None)
-        if at is not None:
-            AT4 = torch.eye(4, dtype=torch.float32)
-            AT4[:3, :4] = torch.tensor(at, dtype=torch.float32)
-            c2ws = AT4 @ c2ws
-        w2c_ext = convert_coordinate(c2ws).numpy()          # c2w -> w2c
-        N = w2c_ext.shape[0]
-        K = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float32)
-        intrinsics = np.repeat(K[None], N, axis=0)
-        cameras = build_cameras(w2c_ext, intrinsics)
-        return cameras
-
-    def get_pcd_from_colmap(self):
-        points = []
-        colors = []
-        for p in self.recon.points3D.values():
-            points.append(p.xyz)
-            colors.append(p.color / 255.0)
-        points = np.asarray(points)
-        colors = np.asarray(colors)
-
-        return points, colors
-
-    def get_pcd_from_ply(self, pcd_path):
-        g = trimesh.load(pcd_path, process=False)
-        if isinstance(g, trimesh.PointCloud):
-            points = np.asarray(g.vertices, dtype=np.float32)
-            colors = getattr(g, "colors", None)
-            if colors is not None:
-                colors = np.asarray(colors, dtype=np.uint8)[:, :3]
-        else:
-            points = np.asarray(g.vertices, dtype=np.float32)
-            colors = None
-        
-        return points, colors
-
-    def get_pcd_from_npy(self, pcd_path):
-        points = np.load(pcd_path)
-        colors = np.repeat([[0., 0., 1.0]], len(points), axis=0)
-
-        return points, colors
-    
-    def get_pcd_from_torch(self, pcd_path):
-        points = torch.load(pcd_path)
-        pts = points[:, :3].numpy()
-        cols = points[:, 3:6].numpy()
-
-        return pts, cols
-
-    def get_pcd_from_mesh_obj(self, pcd_path):
-        mesh = trimesh.load(pcd_path)
-
-        if isinstance(mesh, trimesh.Scene):
-            mesh = trimesh.util.concatenate(tuple(mesh.geometry.values()))
-        
-        points, face_idx = trimesh.sample.sample_surface(mesh, 100000)
-        colors = mesh.visual.face_colors[face_idx][:, :3] # remove alpha
-
-        print(type(points))
-        print(points.shape)
-        print(colors.shape)
-
-        return points, colors
-
-    def get_pcd_from_pcd(self, pcd_path):
-        pcd_o3d = o3d.io.read_point_cloud(pcd_path)
-        
-        points = np.asarray(pcd_o3d.points)
-        colors = np.asarray(pcd_o3d.colors) # 0~1 사이 값
-        
-        # g = trimesh.points.PointCloud(vertices=points, colors=colors)
-        return points, colors
-
-    def get_pcd_from_tartanair(self, pcd_path):
-        pcd_o3d = o3d.io.read_point_cloud(pcd_path)
-        
-        points = np.asarray(pcd_o3d.points)
-        colors = np.asarray(pcd_o3d.colors) # 0~1 사이 값
-
-        # Rotation for tartan air
-        P = np.array([
-            [0, 1, 0],
-            [0, 0, 1],
-            [1, 0, 0]
-        ], dtype=np.float64)
-        points = (P @ points.T).T
-        
-        # g = trimesh.points.PointCloud(vertices=points, colors=colors)
-        return points, colors
+        return camera_parser.get_cameras_by_type(
+            self.camera_type.value,
+            root_camera_path=self.root_camera_path,
+            scene_root_path=self.scene_root_path,
+            root_path=self.root_path,
+            recon=self.recon,
+            custom_camera_path=getattr(self, "custom_camera_path", None),
+            use_custom_camera=self.custom_camera_checkbox.value,
+            custom_camera_data_path=self.custom_camera_data_path,
+            data_root_path=self.data_root_path,
+            task_list=self.task_list,
+            current_task_idx=self.current_task_idx,
+            valid_camera_pred_types=self.valid_camera_pred_types,
+            task_type=self.task_type,
+            frame_idx=self.frame_idx,
+            scale_factor=self.scale_factor,
+            sample_range=self.frustum_range.value if sample else None,
+            sample_interval=self.frustum_interval.value,
+            interpolate_num=self.interpolate_cam_num.value if self.interpolate_cam_checkbox.value else None,
+        )
 
     def render_with_client(self, client, cameras: Cameras):
         images = []
@@ -1919,155 +1648,6 @@ class CustomPanel:
             self.scene_root_path = self.root_path
 
 
-def camera_to_fov_quat_position(camera: Camera):
-    c2w = torch.linalg.inv(camera.world_to_camera.transpose(-1, -2)).detach().cpu().numpy()
-    R = c2w[:3, :3]
-    t = c2w[:3, 3]
-    focal = [camera.fx, camera.fy]
-    princpt = [camera.cx, camera.cy]
-    r = Rotation.from_matrix(R.tolist())
-    quat = r.as_quat() # (x, y, z, w)
-    quat = np.array([quat[3], quat[0], quat[1], quat[2]]) # (w, x, y, z)
-    fov_radians = 2 * np.arctan(2 * princpt[1].cpu() / (2 * focal[1].cpu()))
-    return fov_radians, quat, t
-
-def get_colmap_camera_params(recon: pycolmap.Reconstruction):
-    """
-    Output:
-        extrinsics: [N, 4, 4] numpy array (w2c)
-        intrinsics: [N, 3, 3] numpy array (w2c)
-    """
-    sorted_images = sorted(
-        recon.images.values(),
-        key=lambda img: img.name
-    )
-
-    extrinsic_list = []
-    intrinsic_list = []
-    for image in sorted_images:
-        extrinsic_dict = image.cam_from_world().todict()
-
-        xyzw_w2c, t_w2c = extrinsic_dict['rotation']['quat'], extrinsic_dict['translation']
-        R_w2c = Rotation.from_quat(xyzw_w2c).as_matrix()
-
-        extrinsic = np.eye(4)
-        extrinsic[:3, :3] = R_w2c
-        extrinsic[:3, 3] = t_w2c
-
-        fx, fy, cx, cy = image.camera.params[:4]
-        intrinsic = np.array([
-            [fx, 0, cx],
-            [0, fy, cy],
-            [0, 0, 1]
-        ], dtype=np.float32)
-
-        extrinsic_list.append(extrinsic)
-        intrinsic_list.append(intrinsic)
-    extrinsics = np.stack(extrinsic_list)
-    intrinsics = np.stack(intrinsic_list)
-
-    return extrinsics, intrinsics
-
-def get_camera_params_from_json(json_path):
-    if not os.path.exists(json_path):
-        raise ValueError("no json camera", json_path)
-    
-    with open(json_path, 'r') as f:
-        data = json.load(f)
-
-    extrinsic_list = []
-    intrinsic_list = []
-    for params in data:
-        R_w2c, t_w2c = params['rotation'], params['position']
-
-        extrinsic = np.eye(4)
-        extrinsic[:3, :3] = R_w2c
-        extrinsic[:3, 3] = t_w2c
-
-        fx, fy, cx, cy = params['fx'], params['fy'], params['cx'], params['cy']
-
-        intrinsic = np.array([
-            [fx, 0, cx],
-            [0, fy, cy],
-            [0, 0, 1]
-        ], dtype=np.float32)
-
-        extrinsic_list.append(extrinsic)
-        intrinsic_list.append(intrinsic)
-    extrinsics = np.stack(extrinsic_list)
-    intrinsics = np.stack(intrinsic_list)
-
-    return extrinsics, intrinsics
-
-def get_camera_params_from_json_deprecated(json_path):
-    with open(json_path, 'r') as f:
-        data = json.load(f)
-
-    sorted_params = sorted(
-        data,
-        key=lambda x: x['img_name']
-    )
-
-    extrinsic_list = []
-    intrinsic_list = []
-    for params in sorted_params:
-        R_c2w, t_c2w = params['rotation'], params['position']
-
-        R_w2c = np.array(R_c2w).T
-        t_w2c = (- R_w2c @ np.array(t_c2w).reshape(-1, 1)).squeeze(-1)
-
-        extrinsic = np.eye(4)
-        extrinsic[:3, :3] = R_w2c
-        extrinsic[:3, 3] = t_w2c
-
-        fx, fy = params['fx'], params['fy']
-
-        if 'cx' not in params.keys():
-            scale = 4
-            fx /= scale
-            fy /= scale
-            width, height = params['width'], params['height']
-            width /= scale
-            height /= scale
-            cx, cy = width/2.0, height/2.0
-        else:
-            cx, cy = params['cx'], params['cy']
-
-        intrinsic = np.array([
-            [fx, 0, cx],
-            [0, fy, cy],
-            [0, 0, 1]
-        ], dtype=np.float32)
-
-        extrinsic_list.append(extrinsic)
-        intrinsic_list.append(intrinsic)
-    extrinsics = np.stack(extrinsic_list)
-    intrinsics = np.stack(intrinsic_list)
-
-    return extrinsics, intrinsics
-
-def convert_coordinate(extrinsic):
-    if isinstance(extrinsic, np.ndarray):
-        device = 'cpu'
-    elif isinstance(extrinsic, torch.Tensor):
-        device = extrinsic.device
-    
-    ext_tensor = torch.tensor(extrinsic, device=device)
-    R = ext_tensor[..., :3, :3]
-    t = ext_tensor[..., :3, 3]
-
-    R_inv = R.transpose(-1, -2)
-    t_inv = (-R_inv @ t.unsqueeze(-1)).squeeze(-1)
-
-    ext_inv = torch.zeros_like(ext_tensor, device=device)
-    ext_inv[..., :3, :3] = R_inv
-    ext_inv[..., :3, 3] = t_inv
-    ext_inv[..., 3, 3] = 1
-
-    if isinstance(extrinsic, np.ndarray):
-        ext_inv = ext_inv.numpy()
-
-    return ext_inv
 
 def save_video_imageio(images, save_path, fps=30):
     """
