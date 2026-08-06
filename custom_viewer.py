@@ -9,7 +9,7 @@ import json
 
 import torch
 
-from custom_utils.custom_panel import CustomPanel
+from custom_utils.custom_panel import CustomPanel, PanelMode
 from internal.viewer.ui import populate_render_tab, TransformPanel, EditPanel
 from internal.viewer.ui.up_direction_folder import UpDirectionFolder
 
@@ -239,7 +239,8 @@ class CustomViewer(Viewer):
             recon = pycolmap.Reconstruction(sparse_model_dir)
 
         with tabs.add_tab("Custom"):
-            self.custom_panel = CustomPanel(self, self._server, self.root_path, self.viewer_renderer, recon=recon)
+            self.custom_panel = CustomPanel(self, self._server, self.root_path, self.viewer_renderer, recon=recon,
+                                            mode=PanelMode.GS)
 
         # register hooks
         server.on_client_connect(self._handle_new_client)

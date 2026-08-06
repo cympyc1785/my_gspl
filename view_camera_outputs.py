@@ -5,7 +5,7 @@ import trimesh
 import argparse
 import numpy as np
 
-from custom_utils.custom_panel import CustomPanel
+from custom_utils.custom_panel import CustomPanel, PanelMode
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--root_path", type=str, default="/data2/ckd248/SCVideo/camera_generation/evaluation")
@@ -18,6 +18,9 @@ parser.add_argument("--pcd", action="store_true")
 parser.add_argument("--custom_camera_data_path", type=str, default="./camera_data.json")
 parser.add_argument("--data_root_path", type=str, default="/data2/ckd248/SCVideo/camera_generation/evaluation")
 parser.add_argument("--task_list_path", type=str, default=None)
+parser.add_argument("--mode", type=str, default=None, choices=["task", "gs", "pcd"],
+                    help="override the panel mode; by default it follows from "
+                         "--task_list_path / --ply_path")
 args = parser.parse_args()
 
 root_path = args.root_path
@@ -44,6 +47,7 @@ panel = CustomPanel(None, server, root_path,
                     data_root_path=args.data_root_path,
                     task_type=args.task_type,
                     task_offset=args.task_offset,
+                    mode=PanelMode[args.mode.upper()] if args.mode else None,
                     )
 
 import time
