@@ -7,3 +7,13 @@ clusters
 segments
 **/__pycache__
 results
+SceneData
+eval_ckd
+evaluation_scannet_da3_sample
+evaluation_tartanair_da3_sample
+motion_dataset
+
+# third-party checkout (own .git + model checkpoints, ~1.4GB)
+utils/Depth-Anything-V2
+# local viewer config, holds machine-specific absolute paths
+camera_data.json
