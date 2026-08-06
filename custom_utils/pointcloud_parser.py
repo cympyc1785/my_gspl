@@ -108,16 +108,18 @@ def get_pcd_from_colmap(recon):
 
 def get_pcd_from_ply(pcd_path):
     g = trimesh.load(pcd_path, process=False)
-    if isinstance(g, trimesh.PointCloud):
-        points = np.asarray(g.vertices, dtype=np.float32)
-        colors = getattr(g, "colors", None)
-        if colors is not None:
-            colors = np.asarray(colors, dtype=np.uint8)[:, :3]
-    else:
-        points = np.asarray(g.vertices, dtype=np.float32)
-        colors = None
+    points = np.asarray(g.vertices, dtype=np.float32)
 
-    return points, colors
+    # a PointCloud carries colors on .colors, a mesh on .visual.vertex_colors;
+    # either can come back empty when the file has no color at all
+    colors = getattr(g, "colors", None)
+    if colors is None or len(colors) != len(points):
+        colors = getattr(getattr(g, "visual", None), "vertex_colors", None)
+    if colors is None or len(colors) != len(points):
+        print("no vertex color in", pcd_path, "- using a flat color")
+        return points, np.repeat([[0., 0., 1.0]], len(points), axis=0)
+
+    return points, np.asarray(colors, dtype=np.uint8)[:, :3]
 
 def get_pcd_from_npy(pcd_path):
     points = np.load(pcd_path)
