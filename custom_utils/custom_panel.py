@@ -9,6 +9,7 @@ import time
 import cv2
 import shutil
 
+from enum import Enum, auto
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from tqdm import tqdm
@@ -20,9 +21,29 @@ from .render_frustum import add_frustum_spline
 
 from .color_points import color_points_by_attention
 
+
+class PanelMode(Enum):
+    """Which of the three ways the panel gets used. Controls that only make sense
+    for one of them are not built in the others."""
+    TASK = auto()   # walk a task list, loading each task's scene and cameras
+    GS = auto()     # a 3DGS scene under root_path, rendered through the viewer
+    PCD = auto()    # a point cloud scene loaded from ply_path
+
+    @classmethod
+    def resolve(cls, ply_path, pcd_type, task_list):
+        """Pick the mode the arguments imply, in the order _handle_new_client used
+        to branch: an explicit point cloud wins, then a task list, else the scene
+        sitting under root_path."""
+        if ply_path is not None and pcd_type is not None:
+            return cls.PCD
+        if task_list:
+            return cls.TASK
+        return cls.GS
+
+
 class CustomPanel:
     def __init__(self, viewer, server, root_path, renderer=None, recon=None, custom_camera_data_path=None, pcd=None, ply_path=None,
-    data_root_path=None, pcd_type=None, task_list_path=None, task_type="pred", task_offset=0):
+    data_root_path=None, pcd_type=None, task_list_path=None, task_type="pred", task_offset=0, mode=None):
         self.server = server
         self.root_path = root_path
         self.scene_root_path = None
@@ -51,6 +72,9 @@ class CustomPanel:
                 tasks = f.readlines()
             for task in tasks:
                 self.task_list.append(task.strip().replace("\n", ""))
+
+        self.mode = mode if mode is not None else PanelMode.resolve(ply_path, pcd_type, self.task_list)
+        print("panel mode:", self.mode.name)
 
         # CSV-based navigation (separate from the .txt-based task list)
         self.csv_task_list = []      # task strings converted from CSV scene_path
@@ -143,7 +167,7 @@ class CustomPanel:
         self._setup_vis_folder()
         self.server.on_client_connect(self._handle_new_client)
 
-        if self.ply_path is not None and self.input_pcd_type is not None:
+        if self.mode is PanelMode.PCD:
             self.pcd_type.value = self.input_pcd_type
             self.pcd_path = self.ply_path
             points, colors = self.get_pcd_by_type()
@@ -154,11 +178,13 @@ class CustomPanel:
     
     def _setup_vis_folder(self):
         with self.server.gui.add_folder("Viz"):
-            self._setup_task_controls()
+            if self.mode is PanelMode.TASK:
+                self._setup_task_controls()
             self._setup_render_controls()
             self._setup_frustum_controls()
             self._setup_pcd_controls()
-            self._setup_attention_controls()
+            if self.attention is not None:
+                self._setup_attention_controls()
 
     def _setup_task_controls(self):
         """Task Idx / CSV Idx navigation."""
@@ -299,46 +325,47 @@ class CustomPanel:
             imageio.mimsave(save_path, renders, fps=self.fps.value)
             print("Saved to", save_path)
 
-        render_all_by_client_button = self.server.gui.add_button(
-                "Render All by client",
-                color="Brown",
-                icon=viser.Icon.PLAYER_PLAY,
-                hint="Save smplx scale",
-            )
-        @render_all_by_client_button.on_click
-        def _(event: viser.GuiEvent) -> None:
-            init_cam_type = self.camera_type.value
+        if self.mode is PanelMode.TASK:   # render every prediction model through the client
+            render_all_by_client_button = self.server.gui.add_button(
+                    "Render All by client",
+                    color="Brown",
+                    icon=viser.Icon.PLAYER_PLAY,
+                    hint="Save smplx scale",
+                )
+            @render_all_by_client_button.on_click
+            def _(event: viser.GuiEvent) -> None:
+                init_cam_type = self.camera_type.value
 
-            self.clean_all_camera_frustum()
+                self.clean_all_camera_frustum()
 
-            for cam_type in self.render_targets:
-                self.camera_type.value = cam_type
-                cameras = self.get_cameras_by_type()
-                renders = self.render_with_client(event.client, cameras)
+                for cam_type in self.render_targets:
+                    self.camera_type.value = cam_type
+                    cameras = self.get_cameras_by_type()
+                    renders = self.render_with_client(event.client, cameras)
 
-                output_dir = self.task_output_dir()
+                    output_dir = self.task_output_dir()
 
-                os.makedirs(output_dir, exist_ok=True)
+                    os.makedirs(output_dir, exist_ok=True)
 
-                timestamp = int(time.time())
-                save_path = os.path.join(output_dir, f"{self.camera_type.value}_pointcloud_viz_{timestamp}.mp4")
-                imageio.mimsave(save_path, renders, fps=self.fps.value)
+                    timestamp = int(time.time())
+                    save_path = os.path.join(output_dir, f"{self.camera_type.value}_pointcloud_viz_{timestamp}.mp4")
+                    imageio.mimsave(save_path, renders, fps=self.fps.value)
 
-                frame_indices = {
-                    "first": 0,
-                    "middle": len(renders) // 2,
-                    "last": len(renders) - 1
-                }
+                    frame_indices = {
+                        "first": 0,
+                        "middle": len(renders) // 2,
+                        "last": len(renders) - 1
+                    }
 
-                output_dir = os.path.join(output_dir, cam_type)
-                os.makedirs(output_dir, exist_ok=True)
+                    output_dir = os.path.join(output_dir, cam_type)
+                    os.makedirs(output_dir, exist_ok=True)
 
-                for name, idx in frame_indices.items():
-                    save_path = os.path.join(output_dir, f"{name}.png")
-                    cv2.imwrite(save_path, renders[idx])
+                    for name, idx in frame_indices.items():
+                        save_path = os.path.join(output_dir, f"{name}.png")
+                        cv2.imwrite(save_path, renders[idx])
 
-            self.camera_type.value = init_cam_type
-            print("Saved all videos")
+                self.camera_type.value = init_cam_type
+                print("Saved all videos")
 
         render_by_point_renderer_button = self.server.gui.add_button(
                 "Render by Point Renderer",
@@ -506,105 +533,106 @@ class CustomPanel:
             cap.release()
             print("Inpainted frames with mask saved")
 
-        render_all_camera_preds = self.server.gui.add_button(
-                "Render All Camera Preds",
-                color="purple",
-                icon=viser.Icon.PLAYER_PLAY,
-                hint="Save smplx scale",
-            )
-        @render_all_camera_preds.on_click
-        def _(event: viser.GuiEvent) -> None:
-            print("Rendering")
-            init_cam_type = self.camera_type.value
-            init_frustum_interval = self.frustum_interval.value
-            init_interp_checkbox = self.interpolate_cam_checkbox.value
+        if self.mode is PanelMode.TASK:   # batch render and retrieve over every prediction model
+            render_all_camera_preds = self.server.gui.add_button(
+                    "Render All Camera Preds",
+                    color="purple",
+                    icon=viser.Icon.PLAYER_PLAY,
+                    hint="Save smplx scale",
+                )
+            @render_all_camera_preds.on_click
+            def _(event: viser.GuiEvent) -> None:
+                print("Rendering")
+                init_cam_type = self.camera_type.value
+                init_frustum_interval = self.frustum_interval.value
+                init_interp_checkbox = self.interpolate_cam_checkbox.value
 
-            scene_path = os.path.join(self.scene_root_path, "scene.ply")
+                scene_path = os.path.join(self.scene_root_path, "scene.ply")
 
-            output_dir = self.task_output_dir()
-
-            os.makedirs(output_dir, exist_ok=True)
-
-            cam_dict = {}
-            for cam_type in self.render_targets:
-                self.camera_type.value = cam_type
-                self.frustum_interval.value = 1
-                self.interpolate_cam_checkbox.value = True
-
-                cameras = self.get_cameras_by_type()
-                cam_dict[cam_type] = cameras
-
-            def render_and_save_worker(scene_path, cameras, output_dir, cam_type, fps):
-                renders = get_renders(scene_path, cameras)
-                timestamp = int(time.time())
-                save_path = os.path.join(output_dir, f"{cam_type}_scene_viz_{timestamp}.mp4")
-                imageio.mimsave(save_path, renders, fps=self.fps.value)
-
-            with ThreadPoolExecutor(max_workers=6) as ex:
-                futures = [ex.submit(render_and_save_worker, scene_path, cameras,
-                                     output_dir, cam_type, self.fps.value) for cam_type, cameras in cam_dict.items()]
-                for fut in tqdm(as_completed(futures), total=len(futures), desc="Processing"):
-                    fut.result()
-
-            self.camera_type.value = init_cam_type
-            self.frustum_interval.value = init_frustum_interval
-            self.interpolate_cam_checkbox.value = init_interp_checkbox
-
-            print("Saving video done.")
-
-        retrieve_all_camera_preds = self.server.gui.add_button(
-                "Retrieve All Camera Video",
-                color="purple",
-                icon=viser.Icon.PLAYER_PLAY,
-                hint="Save smplx scale",
-            )
-        @retrieve_all_camera_preds.on_click
-        def _(event: viser.GuiEvent) -> None:
-            print("Retrieving videos...")
-
-            for cam_type in self.render_targets:
                 output_dir = self.task_output_dir()
+
                 os.makedirs(output_dir, exist_ok=True)
 
-                video_src_path = os.path.join(self.data_root_path, cam_type, "test", f"{self.task_list[self.current_task_idx]}_render.mp4")
-                video_dst_path = os.path.join(output_dir, f"{cam_type}_render.mp4")
+                cam_dict = {}
+                for cam_type in self.render_targets:
+                    self.camera_type.value = cam_type
+                    self.frustum_interval.value = 1
+                    self.interpolate_cam_checkbox.value = True
 
-                if not os.path.exists(video_src_path):
-                    print("no vid", video_src_path)
-                    continue
+                    cameras = self.get_cameras_by_type()
+                    cam_dict[cam_type] = cameras
 
-                shutil.copy(video_src_path, video_dst_path)
+                def render_and_save_worker(scene_path, cameras, output_dir, cam_type, fps):
+                    renders = get_renders(scene_path, cameras)
+                    timestamp = int(time.time())
+                    save_path = os.path.join(output_dir, f"{cam_type}_scene_viz_{timestamp}.mp4")
+                    imageio.mimsave(save_path, renders, fps=self.fps.value)
 
-                # capture 3 frames
-                cap = cv2.VideoCapture(video_dst_path)
-                if not cap.isOpened():
-                    print(f"Cannot open video: {video_dst_path}")
-                    continue
+                with ThreadPoolExecutor(max_workers=6) as ex:
+                    futures = [ex.submit(render_and_save_worker, scene_path, cameras,
+                                         output_dir, cam_type, self.fps.value) for cam_type, cameras in cam_dict.items()]
+                    for fut in tqdm(as_completed(futures), total=len(futures), desc="Processing"):
+                        fut.result()
 
-                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                frame_indices = {
-                    "first": 0,
-                    "middle": total_frames // 2,
-                    "last": total_frames - 1
-                }
+                self.camera_type.value = init_cam_type
+                self.frustum_interval.value = init_frustum_interval
+                self.interpolate_cam_checkbox.value = init_interp_checkbox
 
-                output_dir = os.path.join(output_dir, cam_type)
-                os.makedirs(output_dir, exist_ok=True)
+                print("Saving video done.")
 
-                for name, idx in frame_indices.items():
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-                    ret, frame = cap.read()
+            retrieve_all_camera_preds = self.server.gui.add_button(
+                    "Retrieve All Camera Video",
+                    color="purple",
+                    icon=viser.Icon.PLAYER_PLAY,
+                    hint="Save smplx scale",
+                )
+            @retrieve_all_camera_preds.on_click
+            def _(event: viser.GuiEvent) -> None:
+                print("Retrieving videos...")
 
-                    if not ret:
-                        print(f"Failed to read {name} frame at index {idx}")
+                for cam_type in self.render_targets:
+                    output_dir = self.task_output_dir()
+                    os.makedirs(output_dir, exist_ok=True)
+
+                    video_src_path = os.path.join(self.data_root_path, cam_type, "test", f"{self.task_list[self.current_task_idx]}_render.mp4")
+                    video_dst_path = os.path.join(output_dir, f"{cam_type}_render.mp4")
+
+                    if not os.path.exists(video_src_path):
+                        print("no vid", video_src_path)
                         continue
 
-                    save_path = os.path.join(output_dir, f"{name}.png")
-                    cv2.imwrite(save_path, frame)
+                    shutil.copy(video_src_path, video_dst_path)
 
-                cap.release()
+                    # capture 3 frames
+                    cap = cv2.VideoCapture(video_dst_path)
+                    if not cap.isOpened():
+                        print(f"Cannot open video: {video_dst_path}")
+                        continue
 
-            print("Saving video done.")
+                    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    frame_indices = {
+                        "first": 0,
+                        "middle": total_frames // 2,
+                        "last": total_frames - 1
+                    }
+
+                    output_dir = os.path.join(output_dir, cam_type)
+                    os.makedirs(output_dir, exist_ok=True)
+
+                    for name, idx in frame_indices.items():
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                        ret, frame = cap.read()
+
+                        if not ret:
+                            print(f"Failed to read {name} frame at index {idx}")
+                            continue
+
+                        save_path = os.path.join(output_dir, f"{name}.png")
+                        cv2.imwrite(save_path, frame)
+
+                    cap.release()
+
+                print("Saving video done.")
 
     def _setup_frustum_controls(self):
         """Frustum appearance and the frustum visualisation buttons."""
@@ -705,100 +733,101 @@ class CustomPanel:
         def _(event: viser.GuiEvent) -> None:
             self.clean_all_camera_frustum()
 
-        screenshot_all_camera_frustum_button = self.server.gui.add_button(
-            "Screenshot all cam",
-            color="Green",
-            icon=viser.Icon.PLAYER_PLAY,
-            hint="Screenshot",
-        )
-        @screenshot_all_camera_frustum_button.on_click
-        def _(event: viser.GuiEvent) -> None:
-            client = event.client
-            init_cam_type = self.camera_type.value
+        if self.mode is PanelMode.TASK:   # frustum screenshot / screen record over every prediction model
+            screenshot_all_camera_frustum_button = self.server.gui.add_button(
+                "Screenshot all cam",
+                color="Green",
+                icon=viser.Icon.PLAYER_PLAY,
+                hint="Screenshot",
+            )
+            @screenshot_all_camera_frustum_button.on_click
+            def _(event: viser.GuiEvent) -> None:
+                client = event.client
+                init_cam_type = self.camera_type.value
 
-            for cam_type in self.render_targets:
-                self.camera_type.value = cam_type
+                for cam_type in self.render_targets:
+                    self.camera_type.value = cam_type
 
-                self.clean_all_camera_frustum()
+                    self.clean_all_camera_frustum()
 
-                self.visualize_camera_frustum(client)
+                    self.visualize_camera_frustum(client)
 
-                image = client.camera.get_render(width=1280, height=720)
+                    image = client.camera.get_render(width=1280, height=720)
 
-                output_dir = self.task_output_dir("screenshot")
+                    output_dir = self.task_output_dir("screenshot")
 
+                    os.makedirs(output_dir, exist_ok=True)
+
+                    timestamp = int(time.time())
+                    save_path = os.path.join(output_dir, f"{self.current_task_idx}_{self.camera_type.value}_screenshot_{timestamp}.png")
+                    imageio.imwrite(save_path, image)
+
+                    print(f"Screenshot Saved: {save_path}")
+                    # print(f"Image Shape: {image.shape}")
+
+                self.camera_type.value = init_cam_type
+
+            all_screen_record_button = self.server.gui.add_button(
+                "All Screen record",
+                color="Green",
+                icon=viser.Icon.PLAYER_PLAY,
+                hint="Screenrecord",
+            )
+            @all_screen_record_button.on_click
+            def _(event: viser.GuiEvent) -> None:
+                client = event.client
+                assert client is not None
+
+                init_cam_type = self.camera_type.value
+
+                output_dir = self.task_output_dir()
                 os.makedirs(output_dir, exist_ok=True)
 
-                timestamp = int(time.time())
-                save_path = os.path.join(output_dir, f"{self.current_task_idx}_{self.camera_type.value}_screenshot_{timestamp}.png")
-                imageio.imwrite(save_path, image)
+                for camera_type in self.render_targets:
+                    self.clean_all_camera_frustum()
+                    self.camera_type.value = camera_type
+                    cameras = self.get_cameras_by_type()
 
-                print(f"Screenshot Saved: {save_path}")
-                # print(f"Image Shape: {image.shape}")
+                    fov, quat, position = camera_to_fov_quat_position(cameras[0])
 
-            self.camera_type.value = init_cam_type
+                    f_min, f_max = self.frustum_range.value
+                    f_min = int(f_min)
+                    f_max = int(f_max)
+                    cam_min = f_min
+                    cam_max = min(f_max, len(cameras))
 
-        all_screen_record_button = self.server.gui.add_button(
-            "All Screen record",
-            color="Green",
-            icon=viser.Icon.PLAYER_PLAY,
-            hint="Screenrecord",
-        )
-        @all_screen_record_button.on_click
-        def _(event: viser.GuiEvent) -> None:
-            client = event.client
-            assert client is not None
+                    start_color = np.array(self.frustum_start_color.value)
+                    end_color = np.array(self.frustum_end_color.value)
+                    t = np.linspace(0, 1, (cam_max - cam_min))[:, None]  # (N, 1)
+                    colors = (1 - t) * start_color + t * end_color  # (N, 3)
 
-            init_cam_type = self.camera_type.value
+                    screenrecord_list = []
+                    for i in tqdm(range(cam_min, cam_max, 1)):
+                        if i % self.frustum_interval.value == 0:
+                            camera = cameras[i]
+                            fov, quat, position = camera_to_fov_quat_position(camera)
 
-            output_dir = self.task_output_dir()
-            os.makedirs(output_dir, exist_ok=True)
+                            handle = add_frustum_spline(
+                                scene=client.scene,
+                                name=f"camera_{i}_frustum_{camera_type}",
+                                fov_y=fov,
+                                aspect=camera.cx / camera.cy,
+                                wxyz=quat,
+                                position=position,
+                                far=1.0,
+                                scale=self.frustum_scale.value,
+                                thickness=self.frustum_thickness.value,
+                                color=colors[i],
+                            )
 
-            for camera_type in self.render_targets:
-                self.clean_all_camera_frustum()
-                self.camera_type.value = camera_type
-                cameras = self.get_cameras_by_type()
+                            self.frustum_handles[camera_type].append(handle)
+                        image = client.camera.get_render(width=1280, height=720)
+                        screenrecord_list.append(image)
+                    save_path = os.path.join(output_dir, f"cam_frustum_vis_{camera_type}.mp4")
+                    save_video_imageio(np.array(screenrecord_list), save_path, fps=self.fps.value)
+                    print(f"Video Saved: {save_path}")
 
-                fov, quat, position = camera_to_fov_quat_position(cameras[0])
-
-                f_min, f_max = self.frustum_range.value
-                f_min = int(f_min)
-                f_max = int(f_max)
-                cam_min = f_min
-                cam_max = min(f_max, len(cameras))
-
-                start_color = np.array(self.frustum_start_color.value)
-                end_color = np.array(self.frustum_end_color.value)
-                t = np.linspace(0, 1, (cam_max - cam_min))[:, None]  # (N, 1)
-                colors = (1 - t) * start_color + t * end_color  # (N, 3)
-
-                screenrecord_list = []
-                for i in tqdm(range(cam_min, cam_max, 1)):
-                    if i % self.frustum_interval.value == 0:
-                        camera = cameras[i]
-                        fov, quat, position = camera_to_fov_quat_position(camera)
-
-                        handle = add_frustum_spline(
-                            scene=client.scene,
-                            name=f"camera_{i}_frustum_{camera_type}",
-                            fov_y=fov,
-                            aspect=camera.cx / camera.cy,
-                            wxyz=quat,
-                            position=position,
-                            far=1.0,
-                            scale=self.frustum_scale.value,
-                            thickness=self.frustum_thickness.value,
-                            color=colors[i],
-                        )
-
-                        self.frustum_handles[camera_type].append(handle)
-                    image = client.camera.get_render(width=1280, height=720)
-                    screenrecord_list.append(image)
-                save_path = os.path.join(output_dir, f"cam_frustum_vis_{camera_type}.mp4")
-                save_video_imageio(np.array(screenrecord_list), save_path, fps=self.fps.value)
-                print(f"Video Saved: {save_path}")
-
-            self.camera_type.value = init_cam_type
+                self.camera_type.value = init_cam_type
 
     def _setup_pcd_controls(self):
         """Point cloud display plus client-camera save/load and screen record."""
@@ -881,43 +910,44 @@ class CustomPanel:
             client.camera.wxyz = np.array(camera_stat["wxyz"])
             client.camera.look_at = np.array(camera_stat["look_at"])
 
-        screenrecord_button = self.server.gui.add_button(
-            "Screenrecord",
-            color="Green",
-            icon=viser.Icon.PLAYER_PLAY,
-            hint="Screenrecord",
-        )
-        @screenrecord_button.on_click
-        def _(event: viser.GuiEvent) -> None:
-            client = event.client
-            assert client is not None
+        if self.mode is PanelMode.TASK:   # screen record over every prediction model
+            screenrecord_button = self.server.gui.add_button(
+                "Screenrecord",
+                color="Green",
+                icon=viser.Icon.PLAYER_PLAY,
+                hint="Screenrecord",
+            )
+            @screenrecord_button.on_click
+            def _(event: viser.GuiEvent) -> None:
+                client = event.client
+                assert client is not None
 
-            init_cam_type = self.camera_type.value
-            init_frustum_interval = self.frustum_interval.value
-            init_interp_checkbox = self.interpolate_cam_checkbox.value
+                init_cam_type = self.camera_type.value
+                init_frustum_interval = self.frustum_interval.value
+                init_interp_checkbox = self.interpolate_cam_checkbox.value
 
-            output_dir = self.task_output_dir()
+                output_dir = self.task_output_dir()
 
-            os.makedirs(output_dir, exist_ok=True)
+                os.makedirs(output_dir, exist_ok=True)
 
-            for cam_type in tqdm(self.render_targets):
-                self.camera_type.value = cam_type
-                self.frustum_interval.value = 10
-                self.interpolate_cam_checkbox.value = True
+                for cam_type in tqdm(self.render_targets):
+                    self.camera_type.value = cam_type
+                    self.frustum_interval.value = 10
+                    self.interpolate_cam_checkbox.value = True
 
-                self.clean_all_camera_frustum()
-                renders = self.render_frustums(client)
+                    self.clean_all_camera_frustum()
+                    renders = self.render_frustums(client)
 
-                timestamp = int(time.time())
-                save_path = os.path.join(output_dir, f"{cam_type}_frustum_{timestamp}.mp4")
-                # imageio.mimsave(save_path, renders, fps=self.fps.value)
-                save_video_imageio(np.array(renders), save_path, fps=self.fps.value)
+                    timestamp = int(time.time())
+                    save_path = os.path.join(output_dir, f"{cam_type}_frustum_{timestamp}.mp4")
+                    # imageio.mimsave(save_path, renders, fps=self.fps.value)
+                    save_video_imageio(np.array(renders), save_path, fps=self.fps.value)
 
-            self.camera_type.value = init_cam_type
-            self.frustum_interval.value = init_frustum_interval
-            self.interpolate_cam_checkbox.value = init_interp_checkbox
+                self.camera_type.value = init_cam_type
+                self.frustum_interval.value = init_frustum_interval
+                self.interpolate_cam_checkbox.value = init_interp_checkbox
 
-            print("Saving video done.")
+                print("Saving video done.")
 
     def _setup_attention_controls(self):
         """Attention-weighted point colouring."""
@@ -1526,11 +1556,11 @@ class CustomPanel:
 
     def _handle_new_client(self, client):
         print("hello")
-        if self.ply_path is not None and self.input_pcd_type is not None:
+        if self.mode is PanelMode.PCD:
             self.pcd_type.value = self.input_pcd_type
             self.pcd_path = self.ply_path
             self.vis_pointcloud()
-        elif len(self.task_list) > 0:
+        elif self.mode is PanelMode.TASK:
             idx = 0
             ckpt_path = os.path.join(self.output_dir, f"{self.task_type}_task_checkpoint.json")
             if os.path.exists(ckpt_path):
